@@ -86,6 +86,45 @@ _gm_set_origin() {
   fi
 }
 
+_gm_clone() {
+  local remote dest target
+
+  remote=$(_gm_remote_url) || return 1
+
+  # Default the destination folder to the repo name parsed from the URL.
+  local default
+  default=$(basename "$remote" .git)
+  dest=$(gum input \
+    --placeholder "Destination folder (blank = $default)" \
+    --value "$default" \
+    --width 60)
+  [[ -z "$dest" ]] && dest="$default"
+
+  echo ""
+  gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY \
+    "Clone: $remote
+Into:  $dest"
+  echo ""
+  gum confirm "Clone this repository?" || return 1
+
+  if ! gum spin --title "Cloning..." -- git clone "$remote" "$dest"; then
+    _gm_error "Clone failed"
+    return 1
+  fi
+  _gm_success "Cloned into $dest"
+
+  target=$(cd "$dest" 2>/dev/null && pwd) || return 0
+  local action
+  action=$(gum choose --header "Open clone in:" \
+    " Kiro|Kiro" " Shell|Shell" " Skip|Skip")
+
+  case "$action" in
+    Kiro)  kiro "$target" ;;
+    Shell) cd "$target" && exec $SHELL ;;
+    Skip)  ;;
+  esac
+}
+
 _gm_ensure_origin() {
   if git remote get-url origin &>/dev/null 2>&1; then
     return 0
@@ -137,6 +176,7 @@ _gm_repo_setup() {
   action=$(gum choose \
     --header "Set up this directory:" \
     " Init Git Repository|Init Git Repository" \
+    " Clone Repository|Clone Repository" \
     " Set Remote Origin|Set Remote Origin" \
     " Back|← Back")
   [[ -z "$action" || "${action:l}" == "← back" || "${action:l}" == "back" ]] && return 1
@@ -144,6 +184,9 @@ _gm_repo_setup() {
   case "$action" in
     "Init Git Repository")
       _gm_init_repo
+      ;;
+    "Clone Repository")
+      _gm_clone
       ;;
     "Set Remote Origin")
       _gm_set_origin
@@ -1046,13 +1089,24 @@ Mode:  $mode"
   echo ""
   gum confirm "Merge '$source' into '$current'?" || return
 
-  case "${mode:l}" in
-    no-ff)  git merge --no-ff "$source" ;;
-    squash) git merge --squash "$source" ;;
-    *)      git merge "$source" ;;
-  esac
+  _gm_run_merge "$mode" "$source" "$current"
+}
 
-  if [[ $? -eq 0 ]]; then
+# Run the merge in <mode> and handle every outcome. Extra args (e.g.
+# --allow-unrelated-histories) are passed straight to git merge, which is how
+# the unrelated-histories retry re-enters without duplicating the mode logic.
+_gm_run_merge() {
+  local mode="$1" source="$2" current="$3"; shift 3
+  local out rc
+
+  case "${mode:l}" in
+    no-ff)  out=$(git merge --no-ff "$@" "$source" 2>&1); rc=$? ;;
+    squash) out=$(git merge --squash "$@" "$source" 2>&1); rc=$? ;;
+    *)      out=$(git merge "$@" "$source" 2>&1); rc=$? ;;
+  esac
+  [[ -n "$out" ]] && echo "$out"
+
+  if [[ $rc -eq 0 ]]; then
     if [[ "${mode:l}" == "squash" ]]; then
       _gm_info "Squashed '$source' — changes staged, commit when ready."
     else
@@ -1064,7 +1118,13 @@ Mode:  $mode"
         _gm_info "Merged but not pushed."
       fi
     fi
-  else
+    return 0
+  fi
+
+  # A real conflict leaves a merge in progress (MERGE_HEAD / unmerged files);
+  # only then can the user abort or resolve. Anything else (e.g. unrelated
+  # histories) failed before the merge started — there is nothing to abort.
+  if git rev-parse -q --verify MERGE_HEAD &>/dev/null 2>&1 || [[ -n "$(git ls-files -u 2>/dev/null)" ]]; then
     _gm_error "Merge hit conflicts."
     if gum confirm "Abort the merge?"; then
       git merge --abort
@@ -1072,7 +1132,21 @@ Mode:  $mode"
     else
       _gm_info "Resolve conflicts, then commit to finish the merge."
     fi
+    return 1
   fi
+
+  if echo "$out" | grep -qi "unrelated histories"; then
+    _gm_warn "'$source' and '$current' have unrelated histories (no common commit)."
+    if gum confirm "Merge anyway with --allow-unrelated-histories?"; then
+      _gm_run_merge "$mode" "$source" "$current" --allow-unrelated-histories
+      return $?
+    fi
+    _gm_info "Merge cancelled."
+    return 1
+  fi
+
+  _gm_error "Merge failed — see output above."
+  return 1
 }
 
 # ─────────────────────────────────────────────
@@ -1192,7 +1266,7 @@ _gm_banner() {
     --border rounded \
     --border-foreground $_GM_PRIMARY \
     --padding "0 2" \
-    "$(gum style --foreground $_GM_PRIMARY --bold " ${user}")    $(gum style --foreground $_GM_SECONDARY --bold " ${branch}")    ${state}    ${counts}"
+    "$(gum style --foreground $_GM_PRIMARY --bold "🌿 ${user}")    $(gum style --foreground $_GM_SECONDARY --bold " ${branch}")    ${state}    ${counts}"
 }
 
 # Print available subcommands.
@@ -1215,6 +1289,7 @@ _gm_usage() {
   gg merge    [<branch>]       Merge a branch into current
   gg rebase   [<branch>]       Rebase current onto a branch
   gg init                      Initialize git here
+  gg clone                     Clone a repository
   gg remote                    Add or update origin
   gg help                      Show this help"
 }
@@ -1237,6 +1312,7 @@ _gm_dispatch() {
     merge|m)            _gm_merge "$@" ;;
     rebase|rb)          _gm_rebase "$@" ;;
     init)               _gm_init_repo ;;
+    clone|cl)           _gm_clone ;;
     remote|origin)      _gm_set_origin ;;
     help|-h|--help|h)   _gm_usage ;;
     *) _gm_error "Unknown command: $cmd"; echo ""; _gm_usage; return 1 ;;
@@ -1251,7 +1327,7 @@ gg() {
   # Direct subcommand mode: 'gg <command> [sub-action]'.
   if [[ -n "$1" ]]; then
     case "${1:l}" in
-      init|remote|origin|help|-h|--help|h) ;;
+      init|clone|cl|remote|origin|help|-h|--help|h) ;;
       *) _gm_repo_setup_if_needed || return ;;
     esac
     _gm_dispatch "$@"
@@ -1278,6 +1354,7 @@ gg() {
       " Status|Status" \
       " Remote|Remote" \
       " Pull|Pull" \
+      " Push|Push" \
       " Merge|Merge" \
       " Rebase|Rebase" \
       " Quit|Quit")
@@ -1299,6 +1376,7 @@ gg() {
       Remote)   _gm_set_origin ;;
       Fetch)    _gm_fetch ;;
       Pull)     _gm_pull ;;
+      Push)     _gm_push ;;
       Merge)    _gm_merge ;;
       Rebase)   _gm_rebase ;;
     esac

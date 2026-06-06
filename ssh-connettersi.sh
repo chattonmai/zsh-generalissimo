@@ -709,7 +709,7 @@ _sg_menu() {
   local choice
   while true; do
     echo ""
-    _sg_header "SSH CONNETTERSI >"
+    _sg_header "SSH CONNETTERSI 🐚"
     echo ""
     choice=$(gum choose --header "What do you want to do?" \
       " Connect|Connect" \
