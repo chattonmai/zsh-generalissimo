@@ -709,7 +709,7 @@ _sg_menu() {
   local choice
   while true; do
     echo ""
-    _sg_header "SSH >"
+    _sg_header "SSH CONNETTERSI >"
     echo ""
     choice=$(gum choose --header "What do you want to do?" \
       " Connect|Connect" \
@@ -718,7 +718,12 @@ _sg_menu() {
       " Agent|Agent" \
       " Config|Config" \
       " Quit|Quit")
-    [[ -z "$choice" || "$choice" == "Quit" ]] && return
+    [[ -z "$choice" || "$choice" == "Quit" ]] && {
+      echo ""
+      gum style --foreground $_SG_PRIMARY --bold "Ciao! 👋"
+      echo ""
+      return
+    }
     case "$choice" in
       Connect) _sg_connect ;;
       Hosts)   _sg_hosts ;;

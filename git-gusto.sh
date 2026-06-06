@@ -1282,7 +1282,12 @@ gg() {
       " Rebase|Rebase" \
       " Quit|Quit")
     # Empty (Esc) or Quit exits the manager.
-    [[ -z "$choice" || "$choice" == "Quit" ]] && return
+    if [[ -z "$choice" || "$choice" == "Quit" ]]; then
+      echo ""
+      gum style --foreground $_GM_PRIMARY --bold "Ciao! 👋"
+      echo ""
+      return
+    fi
 
     case "$choice" in
       Ship)     _gm_ship ;;
