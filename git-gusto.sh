@@ -1320,21 +1320,26 @@ _gm_rebase() {
 _gm_stage_commit() {
   _gm_require_repo || return
 
-  local branch staged
-  branch=$(_gm_current_branch)
-  _gm_header "Commit — $branch"
-  echo ""
+  local action staged
+  action=$(gum choose \
+    --header "Commit:" \
+    " Add (stage all files)|Add" \
+    " Commit (staged files only)|Commit")
+  [[ -z "$action" ]] && return
 
-  git add -A
-  staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
-  if [[ "$staged" -eq 0 ]]; then
-    _gm_warn "Nothing to commit — working tree clean."
-    return 1
+  if [[ "$action" == "Add" ]]; then
+    git add -A
+    staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
+    if [[ "$staged" -eq 0 ]]; then
+      _gm_warn "Nothing to stage — working tree clean."
+      return 1
+    fi
+    _gm_info "Staged $staged file(s)"
+    echo ""
+    gum confirm "Continue to commit?" || { _gm_info "Staged but not committed."; return; }
   fi
-  _gm_info "Staged $staged file(s)"
-  echo ""
 
-  _gm_commit || return 1
+  _gm_commit
 }
 
 # ─────────────────────────────────────────────
