@@ -799,7 +799,7 @@ _gm_worktree() {
   if [[ -z "$action" ]]; then
     action=$(gum choose \
       --header "Worktree:" \
-      " Add|Add" " Remove|Remove" " Open|Open" " List|List" " Back|← Back")
+      " List|List" " Add|Add" " Remove|Remove" " Open|Open" " Back|← Back")
   fi
   [[ -z "$action" ]] && return
 
@@ -1132,11 +1132,19 @@ _gm_integrate() {
 
   local choice
   while true; do
-    choice=$(gum choose --header "Integrate:" \
-      " Merge|Merge" " Rebase|Rebase" " Back|← Back")
+    choice=$(gum choose --header "Sync:" \
+      " Fetch|Fetch" \
+      " Pull|Pull" \
+      " Push|Push" \
+      " Merge|Merge" \
+      " Rebase|Rebase" \
+      " Back|← Back")
     [[ -z "$choice" || "${choice:l}" == "← back" || "${choice:l}" == "back" ]] && return
 
     case "$choice" in
+      Fetch)  _gm_fetch ;;
+      Pull)   _gm_pull ;;
+      Push)   _gm_push ;;
       Merge)  _gm_merge ;;
       Rebase) _gm_rebase ;;
     esac
@@ -1469,7 +1477,7 @@ _gm_usage() {
   gg status                    Repo status
   gg fetch    [origin|all]
   gg pull     [rebase|merge]
-  gg integrate                 Merge / Rebase menu
+  gg sync                      Merge / Rebase menu
   gg merge    [<branch>]       Merge a branch into current
   gg rebase   [<branch>]       Rebase current onto a branch
   gg init                      Initialize git here
@@ -1494,7 +1502,7 @@ _gm_dispatch() {
     fetch|f)            _gm_fetch "$@" ;;
     pull)               _gm_pull "$@" ;;
     push|p)             _gm_push "$@" ;;
-    integrate|i)        _gm_integrate ;;
+    sync|integrate|i)   _gm_integrate ;;
     merge|m)            _gm_merge "$@" ;;
     rebase|rb)          _gm_rebase "$@" ;;
     init)               _gm_init_repo ;;
@@ -1536,11 +1544,9 @@ gg() {
       " Changes|Changes" \
       " Search|Search" \
       " Refs|Refs" \
+      " Sync|Sync" \
       " Status|Status" \
       " Remote|Remote" \
-      " Pull|Pull" \
-      " Push|Push" \
-      " Integrate|Integrate" \
       " Quit|Quit")
     # Empty (Esc) or Quit exits the manager.
     if [[ -z "$choice" || "$choice" == "Quit" ]]; then
@@ -1551,16 +1557,14 @@ gg() {
     fi
 
     case "$choice" in
+      Fetch)    _gm_fetch ;;
       Ship)     _gm_ship ;;
       Changes)  _gm_stage_commit ;;
       Refs)     _gm_refs ;;
       Search)   _gm_search ;;
+      Sync)     _gm_integrate ;;
       Status)   _gm_status ;;
       Remote)   _gm_remote ;;
-      Fetch)    _gm_fetch ;;
-      Pull)     _gm_pull ;;
-      Push)     _gm_push ;;
-      Integrate) _gm_integrate ;;
     esac
   done
 }
