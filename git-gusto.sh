@@ -67,23 +67,81 @@ _gm_initial_commit() {
   fi
 }
 
-_gm_set_origin() {
-  local remote
+# Add or update a named remote. $1 = remote name; when omitted, prompt for
+# origin / upstream / a custom name. Reports whether it added or updated.
+_gm_set_remote() {
+  local name="$1" remote
 
+  if [[ -z "$name" ]]; then
+    name=$(gum choose --header "Remote name:" \
+      " origin|origin" " upstream|upstream" " Custom…|__custom__")
+    [[ -z "$name" ]] && return 1
+    if [[ "$name" == "__custom__" ]]; then
+      name=$(gum input --placeholder "Remote name (e.g. fork)" --width 40)
+      [[ -z "$name" ]] && return 1
+    fi
+  fi
+
+  remote=$(_gm_remote_url) || return 1
+  if git remote get-url "$name" &>/dev/null 2>&1; then
+    git remote set-url "$name" "$remote" || return 1
+    _gm_success "Updated $name: $remote"
+  else
+    git remote add "$name" "$remote" || return 1
+    _gm_success "Added $name: $remote"
+  fi
+}
+
+# Bootstrap origin specifically — used by the init/push flows that require it.
+# Offers to init a repo first when there isn't one, then delegates to the
+# general helper with a fixed "origin" name.
+_gm_set_origin() {
   if ! git rev-parse --git-dir &>/dev/null 2>&1; then
     gum confirm "This directory is not a git repository. Initialize it first?" || return 1
     _gm_git_init_main || return 1
     _gm_success "Initialized repository on main"
   fi
 
-  remote=$(_gm_remote_url) || return 1
-  if git remote get-url origin &>/dev/null 2>&1; then
-    git remote set-url origin "$remote" || return 1
-    _gm_success "Updated origin: $remote"
-  else
-    git remote add origin "$remote" || return 1
-    _gm_success "Added origin: $remote"
+  _gm_set_remote origin
+}
+
+# Remote submenu: list / add-update / remove.
+_gm_remote() {
+  _gm_require_repo || return
+
+  local action="$1"
+  if [[ -z "$action" ]]; then
+    action=$(gum choose --header "Remote:" \
+      " List|List" " Add / Update|Set" " Remove|Remove" " Back|← Back")
   fi
+  [[ -z "$action" ]] && return
+
+  case "${action:l}" in
+    list)            _gm_remote_list ;;
+    set|add|update)  _gm_set_remote ;;
+    remove|delete)   _gm_remote_delete ;;
+    "← back"|back)   return ;;
+    *) _gm_error "Unknown remote action: $action" ;;
+  esac
+}
+
+_gm_remote_list() {
+  local remotes
+  remotes=$(git remote -v)
+  [[ -z "$remotes" ]] && { _gm_warn "No remotes configured."; return; }
+  {
+    gum style --foreground $_GM_PRIMARY --bold " REMOTES"
+    echo ""
+    echo "$remotes"
+  } | gum pager
+}
+
+_gm_remote_delete() {
+  local name
+  name=$(git remote | _gm_filter --placeholder "Select remote to remove...")
+  [[ -z "$name" ]] && return
+  gum confirm "Remove remote '$name'?" || return
+  git remote remove "$name" && _gm_success "Removed remote: $name"
 }
 
 _gm_clone() {
@@ -289,6 +347,14 @@ _gm_warn()    { gum style --foreground $_GM_WARN    "⚠ $1"; }
 _gm_error()   { gum style --foreground $_GM_ERROR   "✘ $1"; }
 _gm_info()    { gum style --foreground $_GM_SECONDARY "→ $1"; }
 
+# gum filter, but never fall back to the cwd file browser on empty input.
+_gm_filter() {
+  local input
+  input=$(cat)
+  [[ -z "$input" ]] && return 1
+  print -r -- "$input" | gum filter "$@"
+}
+
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
@@ -444,8 +510,13 @@ _gm_commit() {
   type=$(gum choose \
     --header "Select commit type:" \
     " feat|feat" " fix|fix" " docs|docs" " chore|chore" \
-    " refactor|refactor" " test|test" " style|style" " ci|ci")
+    " refactor|refactor" " test|test" " style|style" " ci|ci" \
+    " Custom…|__custom__")
   [[ -z "$type" ]] && return 1
+  if [[ "$type" == "__custom__" ]]; then
+    type=$(gum input --placeholder "Custom type (e.g. wip, release)..." --width 40)
+    [[ -z "$type" ]] && return 1
+  fi
 
   msg=$(gum input --placeholder "Commit message..." --width 60)
   [[ -z "$msg" ]] && return 1
@@ -497,10 +568,10 @@ _gm_branch_switch() {
   local branch dirty stashed
   branch=$(git branch --all \
     | grep -v HEAD \
-    | sed 's/^[* ]*//' \
+    | sed 's/^[+* ]*//' \
     | sed 's|remotes/origin/||' \
     | sort -u \
-    | gum filter --placeholder "Search branch...")
+    | _gm_filter --placeholder "Search branch...")
   [[ -z "$branch" ]] && return
 
   # Uncommitted changes block a checkout — offer to stash them out of the way.
@@ -542,10 +613,10 @@ _gm_branch_create() {
   if [[ "$from" == "other" ]]; then
     base=$(git branch --all \
       | grep -v HEAD \
-      | sed 's/^[* ]*//' \
+      | sed 's/^[+* ]*//' \
       | sed 's|remotes/origin/||' \
       | sort -u \
-      | gum filter --placeholder "Select base branch...")
+      | _gm_filter --placeholder "Select base branch...")
     [[ -z "$base" ]] && return
     git checkout -b "$name" "$base"
     _gm_success "Created branch: $name (from $base)"
@@ -564,8 +635,8 @@ _gm_branch_rename() {
   local old new had_upstream
 
   old=$(git branch \
-    | sed 's/^[* ]*//' \
-    | gum filter --placeholder "Select branch to rename...")
+    | sed 's/^[+* ]*//' \
+    | _gm_filter --placeholder "Select branch to rename...")
   [[ -z "$old" ]] && return
 
   new=$(gum input --placeholder "New name for '$old'" --value "$old" --width 50)
@@ -590,8 +661,8 @@ _gm_branch_delete() {
   local branch
   branch=$(git branch \
     | grep -v '^\*' \
-    | sed 's/^[* ]*//' \
-    | gum filter --placeholder "Select branch to delete...")
+    | sed 's/^[+* ]*//' \
+    | _gm_filter --placeholder "Select branch to delete...")
   [[ -z "$branch" ]] && return
 
   gum confirm "Delete local branch '$branch'?" || return
@@ -618,7 +689,7 @@ _gm_branch_list() {
   width=${COLUMNS:-0}; (( width < 20 )) && width=$(tput cols 2>/dev/null || echo 120)
 
   [[ "${scope:l}" == "local"  || "${scope:l}" == "all" ]] && \
-    local_branches=$(git branch | sed 's/^[* ]*//')
+    local_branches=$(git branch | sed 's/^[+* ]*//')
   [[ "${scope:l}" == "remote" || "${scope:l}" == "all" ]] && \
     remote_branches=$(git branch -r | grep -v HEAD | sed 's|^[[:space:]]*origin/||')
 
@@ -687,7 +758,7 @@ _gm_tag_create() {
 
 _gm_tag_delete() {
   local tag
-  tag=$(git tag --sort=-v:refname | gum filter --no-fuzzy-sort --placeholder "Select tag to delete...")
+  tag=$(git tag --sort=-v:refname | _gm_filter --no-fuzzy-sort --placeholder "Select tag to delete...")
   [[ -z "$tag" ]] && return
 
   gum confirm "Delete local tag '$tag'?" || return
@@ -751,14 +822,14 @@ _gm_worktree_create() {
   if [[ "$scope" == "Local branch" ]]; then
     branch=$(git branch \
       | grep -v HEAD \
-      | sed 's/^[* ]*//' \
-      | gum filter --placeholder "Select local branch...")
+      | sed 's/^[+* ]*//' \
+      | _gm_filter --placeholder "Select local branch...")
   else
     branch=$(git branch -r \
       | grep -v HEAD \
       | sed 's|^[[:space:]]*origin/||' \
       | sort -u \
-      | gum filter --placeholder "Select remote branch...")
+      | _gm_filter --placeholder "Select remote branch...")
   fi
   [[ -z "$branch" ]] && return
 
@@ -823,7 +894,7 @@ _gm_worktree_delete() {
   worktrees=$(git worktree list | tail -n +2)
   [[ -z "$worktrees" ]] && { _gm_warn "No additional worktrees."; return; }
 
-  selected=$(echo "$worktrees" | gum filter --placeholder "Select worktree to delete...")
+  selected=$(echo "$worktrees" | _gm_filter --placeholder "Select worktree to delete...")
   [[ -z "$selected" ]] && return
 
   wt_path=$(echo "$selected" | awk '{print $1}')
@@ -839,16 +910,6 @@ Path:   $wt_path"
 
   git worktree remove "$wt_path"
   _gm_success "Removed worktree: $wt_path"
-
-  if gum confirm "Delete local branch '$branch' too?"; then
-    git branch -d "$branch"
-    _gm_success "Deleted local branch: $branch"
-
-    if gum confirm "Delete remote branch '$branch' too?"; then
-      gum spin --title "Deleting remote..." -- git push origin --delete "$branch"
-      _gm_success "Deleted remote branch: $branch"
-    fi
-  fi
 }
 
 _gm_worktree_open() {
@@ -857,7 +918,7 @@ _gm_worktree_open() {
   worktrees=$(git worktree list | tail -n +2)
   [[ -z "$worktrees" ]] && { _gm_warn "No additional worktrees."; return; }
 
-  selected=$(echo "$worktrees" | gum filter --placeholder "Select worktree to open...")
+  selected=$(echo "$worktrees" | _gm_filter --placeholder "Select worktree to open...")
   [[ -z "$selected" ]] && return
 
   wt_path=$(echo "$selected" | awk '{print $1}')
@@ -887,6 +948,27 @@ _gm_worktree_list() {
 }
 
 # ─────────────────────────────────────────────
+# Refs  (Branch / Tag / Worktree in one menu)
+# ─────────────────────────────────────────────
+
+_gm_refs() {
+  _gm_require_repo || return
+
+  local choice
+  while true; do
+    choice=$(gum choose --header "Refs:" \
+      " Branch|Branch" " Tag|Tag" " Worktree|Worktree" " Back|← Back")
+    [[ -z "$choice" || "${choice:l}" == "← back" || "${choice:l}" == "back" ]] && return
+
+    case "$choice" in
+      Branch)   _gm_branch ;;
+      Tag)      _gm_tag ;;
+      Worktree) _gm_worktree ;;
+    esac
+  done
+}
+
+# ─────────────────────────────────────────────
 # Search
 # ─────────────────────────────────────────────
 
@@ -912,7 +994,7 @@ _gm_search() {
 _gm_search_commits() {
   local selected hash action
 
-  selected=$(git log --oneline --all | gum filter --placeholder "Search commits...")
+  selected=$(git log --oneline --all | _gm_filter --placeholder "Search commits...")
   [[ -z "$selected" ]] && return
 
   hash=$(echo "$selected" | awk '{print $1}')
@@ -931,8 +1013,8 @@ _gm_search_branches() {
   local branch action
 
   branch=$(git branch -a \
-    | sed 's/^[* ]*//' \
-    | gum filter --placeholder "Search branches...")
+    | sed 's/^[+* ]*//' \
+    | _gm_filter --placeholder "Search branches...")
   [[ -z "$branch" ]] && return
 
   action=$(gum choose --header "Action for '$branch':" \
@@ -948,7 +1030,7 @@ _gm_search_branches() {
 _gm_search_tags() {
   local tag action
 
-  tag=$(git tag --sort=-v:refname | gum filter --no-fuzzy-sort --placeholder "Search tags...")
+  tag=$(git tag --sort=-v:refname | _gm_filter --no-fuzzy-sort --placeholder "Search tags...")
   [[ -z "$tag" ]] && return
 
   action=$(gum choose --header "Action for '$tag':" \
@@ -1042,6 +1124,26 @@ _gm_push() {
 }
 
 # ─────────────────────────────────────────────
+# Integrate  (Merge / Rebase in one menu)
+# ─────────────────────────────────────────────
+
+_gm_integrate() {
+  _gm_require_repo || return
+
+  local choice
+  while true; do
+    choice=$(gum choose --header "Integrate:" \
+      " Merge|Merge" " Rebase|Rebase" " Back|← Back")
+    [[ -z "$choice" || "${choice:l}" == "← back" || "${choice:l}" == "back" ]] && return
+
+    case "$choice" in
+      Merge)  _gm_merge ;;
+      Rebase) _gm_rebase ;;
+    esac
+  done
+}
+
+# ─────────────────────────────────────────────
 # Merge  (merge another branch into the current one)
 # ─────────────────────────────────────────────
 
@@ -1061,19 +1163,19 @@ _gm_merge() {
     case "${scope:l}" in
       local)
         source=$(git branch \
-          | grep -v HEAD | sed 's/^[* ]*//' \
+          | grep -v HEAD | sed 's/^[+* ]*//' \
           | grep -vx "$current" \
-          | gum filter --placeholder "Search branch to merge into $current...") ;;
+          | _gm_filter --placeholder "Search branch to merge into $current...") ;;
       remote)
         source=$(git branch -r \
           | grep -v HEAD | sed 's|^[[:space:]]*origin/||' \
           | sort -u | grep -vx "$current" \
-          | gum filter --placeholder "Search remote branch to merge into $current...") ;;
+          | _gm_filter --placeholder "Search remote branch to merge into $current...") ;;
       all)
         source=$(git branch --all \
-          | grep -v HEAD | sed 's/^[* ]*//' | sed 's|remotes/origin/||' \
+          | grep -v HEAD | sed 's/^[+* ]*//' | sed 's|remotes/origin/||' \
           | sort -u | grep -vx "$current" \
-          | gum filter --placeholder "Search branch to merge into $current...") ;;
+          | _gm_filter --placeholder "Search branch to merge into $current...") ;;
     esac
   fi
   [[ -z "$source" ]] && return
@@ -1169,19 +1271,19 @@ _gm_rebase() {
     case "${scope:l}" in
       local)
         onto=$(git branch \
-          | grep -v HEAD | sed 's/^[* ]*//' \
+          | grep -v HEAD | sed 's/^[+* ]*//' \
           | grep -vx "$current" \
-          | gum filter --placeholder "Rebase $current onto...") ;;
+          | _gm_filter --placeholder "Rebase $current onto...") ;;
       remote)
         onto=$(git branch -r \
           | grep -v HEAD | sed 's|^[[:space:]]*origin/||' \
           | sort -u | grep -vx "$current" \
-          | gum filter --placeholder "Rebase $current onto...") ;;
+          | _gm_filter --placeholder "Rebase $current onto...") ;;
       all)
         onto=$(git branch --all \
-          | grep -v HEAD | sed 's/^[* ]*//' | sed 's|remotes/origin/||' \
+          | grep -v HEAD | sed 's/^[+* ]*//' | sed 's|remotes/origin/||' \
           | sort -u | grep -vx "$current" \
-          | gum filter --placeholder "Rebase $current onto...") ;;
+          | _gm_filter --placeholder "Rebase $current onto...") ;;
     esac
   fi
   [[ -z "$onto" ]] && return
@@ -1212,31 +1314,36 @@ _gm_rebase() {
 }
 
 # ─────────────────────────────────────────────
+# Stage + Commit  (add . → commit, no push)
+# ─────────────────────────────────────────────
+
+_gm_stage_commit() {
+  _gm_require_repo || return
+
+  local branch staged
+  branch=$(_gm_current_branch)
+  _gm_header "Commit — $branch"
+  echo ""
+
+  git add -A
+  staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
+  if [[ "$staged" -eq 0 ]]; then
+    _gm_warn "Nothing to commit — working tree clean."
+    return 1
+  fi
+  _gm_info "Staged $staged file(s)"
+  echo ""
+
+  _gm_commit || return 1
+}
+
+# ─────────────────────────────────────────────
 # Ship  (add . → commit → push)
 # ─────────────────────────────────────────────
 
 _gm_ship() {
   _gm_require_repo || return
-
-  local branch staged
-  branch=$(_gm_current_branch)
-  _gm_header "Ship — $branch"
-  echo ""
-
-  # 1) Stage everything.
-  git add -A
-  staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
-  if [[ "$staged" -eq 0 ]]; then
-    _gm_warn "Nothing to commit — working tree clean."
-    return
-  fi
-  _gm_info "Staged $staged file(s)"
-  echo ""
-
-  # 2) Commit (same flow as the Commit menu). Abort the whole ship if cancelled.
-  _gm_commit || { _gm_warn "Ship aborted — nothing pushed."; return; }
-
-  # 3) Push.
+  _gm_stage_commit || { _gm_warn "Ship aborted — nothing pushed."; return; }
   echo ""
   gum confirm "Push to remote now?" || { _gm_info "Committed but not pushed."; return; }
   _gm_push
@@ -1277,8 +1384,9 @@ _gm_usage() {
   echo ""
   gum style \
     "  gg ship                      add . → commit → push
-  gg commit                    Conventional commit
+  gg commit                    Stage all + conventional commit (no push)
   gg push     [push|force]
+  gg refs                      Branch / Tag / Worktree menu
   gg branch   [list [local|remote|all]|switch|create|rename|delete]
   gg tag      [list|create|delete]
   gg worktree [create|delete|open|list]
@@ -1286,11 +1394,12 @@ _gm_usage() {
   gg status                    Repo status
   gg fetch    [origin|all]
   gg pull     [rebase|merge]
+  gg integrate                 Merge / Rebase menu
   gg merge    [<branch>]       Merge a branch into current
   gg rebase   [<branch>]       Rebase current onto a branch
   gg init                      Initialize git here
   gg clone                     Clone a repository
-  gg remote                    Add or update origin
+  gg remote   [list|set|remove]   Manage remotes (origin/upstream/…)
   gg help                      Show this help"
 }
 
@@ -1300,7 +1409,8 @@ _gm_dispatch() {
   local cmd="$1"; shift
   case "${cmd:l}" in
     ship)               _gm_ship ;;
-    commit|c|ci)        _gm_commit ;;
+    commit|c|ci)        _gm_stage_commit ;;
+    refs|r)             _gm_refs ;;
     branch|b|br)        _gm_branch "$@" ;;
     tag|t)              _gm_tag "$@" ;;
     worktree|wt|w)      _gm_worktree "$@" ;;
@@ -1309,11 +1419,12 @@ _gm_dispatch() {
     fetch|f)            _gm_fetch "$@" ;;
     pull)               _gm_pull "$@" ;;
     push|p)             _gm_push "$@" ;;
+    integrate|i)        _gm_integrate ;;
     merge|m)            _gm_merge "$@" ;;
     rebase|rb)          _gm_rebase "$@" ;;
     init)               _gm_init_repo ;;
     clone|cl)           _gm_clone ;;
-    remote|origin)      _gm_set_origin ;;
+    remote|origin)      _gm_remote "$@" ;;
     help|-h|--help|h)   _gm_usage ;;
     *) _gm_error "Unknown command: $cmd"; echo ""; _gm_usage; return 1 ;;
   esac
@@ -1347,16 +1458,14 @@ gg() {
       --header "What do you want to do?" \
       " Fetch|Fetch" \
       " Ship (add → commit → push)|Ship" \
+      " Commit (stage → commit)|Commit" \
       " Search|Search" \
-      " Branch|Branch" \
-      " Tag|Tag" \
-      " Worktree|Worktree" \
+      " Refs|Refs" \
       " Status|Status" \
       " Remote|Remote" \
       " Pull|Pull" \
       " Push|Push" \
-      " Merge|Merge" \
-      " Rebase|Rebase" \
+      " Integrate|Integrate" \
       " Quit|Quit")
     # Empty (Esc) or Quit exits the manager.
     if [[ -z "$choice" || "$choice" == "Quit" ]]; then
@@ -1368,17 +1477,15 @@ gg() {
 
     case "$choice" in
       Ship)     _gm_ship ;;
-      Branch)   _gm_branch ;;
-      Tag)      _gm_tag ;;
-      Worktree) _gm_worktree ;;
+      Commit)   _gm_stage_commit ;;
+      Refs)     _gm_refs ;;
       Search)   _gm_search ;;
       Status)   _gm_status ;;
-      Remote)   _gm_set_origin ;;
+      Remote)   _gm_remote ;;
       Fetch)    _gm_fetch ;;
       Pull)     _gm_pull ;;
       Push)     _gm_push ;;
-      Merge)    _gm_merge ;;
-      Rebase)   _gm_rebase ;;
+      Integrate) _gm_integrate ;;
     esac
   done
 }
