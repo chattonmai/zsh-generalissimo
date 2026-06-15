@@ -1321,25 +1321,84 @@ _gm_stage_commit() {
   _gm_require_repo || return
 
   local action staged
-  action=$(gum choose \
-    --header "Commit:" \
-    " Add (stage all files)|Add" \
-    " Commit (staged files only)|Commit")
-  [[ -z "$action" ]] && return
+  while true; do
+    action=$(gum choose \
+      --header "Changes:" \
+      " Add (stage all files)|Add" \
+      " Remove from stage|Unstage" \
+      " Commit (staged files only)|Commit" \
+      " Undo Last Commit|Undo" \
+      " Push|Push" \
+      " Back|← Back")
+    [[ -z "$action" || "$action" == "← Back" ]] && return
 
-  if [[ "$action" == "Add" ]]; then
-    git add -A
-    staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
-    if [[ "$staged" -eq 0 ]]; then
-      _gm_warn "Nothing to stage — working tree clean."
-      return 1
-    fi
-    _gm_info "Staged $staged file(s)"
-    echo ""
-    gum confirm "Continue to commit?" || { _gm_info "Staged but not committed."; return; }
+    case "$action" in
+      Add)
+        git add -A
+        staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
+        if [[ "$staged" -eq 0 ]]; then
+          _gm_warn "Nothing to stage — working tree clean."
+        else
+          _gm_success "Staged $staged file(s)"
+        fi
+        ;;
+      Unstage)
+        _gm_unstage
+        ;;
+      Commit)
+        _gm_commit
+        ;;
+      Undo)
+        _gm_undo_commit
+        ;;
+      Push)
+        _gm_push
+        ;;
+    esac
+  done
+}
+
+_gm_unstage() {
+  local files selected
+
+  files=$(git diff --cached --name-only 2>/dev/null)
+  if [[ -z "$files" ]]; then
+    _gm_warn "Nothing is staged."
+    return 1
   fi
 
-  _gm_commit
+  selected=$(echo "$files" | gum filter --no-limit --placeholder "Select files to unstage (TAB to multi-select)...")
+  [[ -z "$selected" ]] && return
+
+  echo "$selected" | xargs git restore --staged
+  _gm_success "Unstaged selected file(s)"
+}
+
+_gm_undo_commit() {
+  local last mode
+
+  last=$(git log -1 --oneline 2>/dev/null)
+  if [[ -z "$last" ]]; then
+    _gm_warn "No commits to undo."
+    return 1
+  fi
+
+  gum style --border rounded --padding "0 1" --border-foreground $_GM_WARN "Last commit: $last"
+  echo ""
+
+  mode=$(gum choose \
+    --header "Undo mode:" \
+    " Soft (keep changes staged)|soft" \
+    " Mixed (keep changes unstaged)|mixed" \
+    " Hard (discard all changes)|hard")
+  [[ -z "$mode" ]] && return
+
+  if [[ "$mode" == "hard" ]]; then
+    gum confirm "Hard reset will permanently discard all changes from this commit. Continue?" || return
+  fi
+
+  git reset --"$mode" HEAD~1
+  _gm_success "Undid last commit ($mode)"
 }
 
 # ─────────────────────────────────────────────
@@ -1348,7 +1407,18 @@ _gm_stage_commit() {
 
 _gm_ship() {
   _gm_require_repo || return
-  _gm_stage_commit || { _gm_warn "Ship aborted — nothing pushed."; return; }
+
+  local staged
+  git add -A
+  staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
+  if [[ "$staged" -eq 0 ]]; then
+    _gm_warn "Nothing to commit — working tree clean."
+    return
+  fi
+  _gm_info "Staged $staged file(s)"
+  echo ""
+
+  _gm_commit || { _gm_warn "Ship aborted — nothing pushed."; return; }
   echo ""
   gum confirm "Push to remote now?" || { _gm_info "Committed but not pushed."; return; }
   _gm_push
@@ -1463,7 +1533,7 @@ gg() {
       --header "What do you want to do?" \
       " Fetch|Fetch" \
       " Ship (add → commit → push)|Ship" \
-      " Commit (stage → commit)|Commit" \
+      " Changes|Changes" \
       " Search|Search" \
       " Refs|Refs" \
       " Status|Status" \
@@ -1482,7 +1552,7 @@ gg() {
 
     case "$choice" in
       Ship)     _gm_ship ;;
-      Commit)   _gm_stage_commit ;;
+      Changes)  _gm_stage_commit ;;
       Refs)     _gm_refs ;;
       Search)   _gm_search ;;
       Status)   _gm_status ;;
