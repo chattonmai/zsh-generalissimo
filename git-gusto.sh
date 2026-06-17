@@ -50,7 +50,7 @@ _gm_initial_commit() {
   fi
 
   local msg
-  git add -A
+  _gm_run add -A
   if [[ -z "$(git diff --cached --name-only)" ]]; then
     _gm_warn "Nothing to commit yet — add files before pushing."
     return 1
@@ -59,7 +59,7 @@ _gm_initial_commit() {
   msg=$(gum input --placeholder "Initial commit message..." --value "Initial commit" --width 60)
   [[ -z "$msg" ]] && return 1
 
-  if git commit -m "$msg"; then
+  if _gm_run commit -m "$msg"; then
     _gm_success "Created initial commit: $msg"
   else
     _gm_error "Initial commit failed"
@@ -84,10 +84,10 @@ _gm_set_remote() {
 
   remote=$(_gm_remote_url) || return 1
   if git remote get-url "$name" &>/dev/null 2>&1; then
-    git remote set-url "$name" "$remote" || return 1
+    _gm_run remote set-url "$name" "$remote" || return 1
     _gm_success "Updated $name: $remote"
   else
-    git remote add "$name" "$remote" || return 1
+    _gm_run remote add "$name" "$remote" || return 1
     _gm_success "Added $name: $remote"
   fi
 }
@@ -141,7 +141,7 @@ _gm_remote_delete() {
   name=$(git remote | _gm_filter --placeholder "Select remote to remove...")
   [[ -z "$name" ]] && return
   gum confirm "Remove remote '$name'?" || return
-  git remote remove "$name" && _gm_success "Removed remote: $name"
+  _gm_run remote remove "$name" && _gm_success "Removed remote: $name"
 }
 
 _gm_clone() {
@@ -165,6 +165,7 @@ Into:  $dest"
   echo ""
   gum confirm "Clone this repository?" || return 1
 
+  _gm_cmd clone "$remote" "$dest"
   if ! gum spin --title "Cloning..." -- git clone "$remote" "$dest"; then
     _gm_error "Clone failed"
     return 1
@@ -197,7 +198,7 @@ _gm_prefer_main_branch() {
   branch=$(git symbolic-ref --short HEAD 2>/dev/null) || return 0
 
   if [[ "$branch" == "master" ]] && gum confirm "Rename branch 'master' to 'main' before pushing?"; then
-    git branch -m main || return 1
+    _gm_run branch -m main || return 1
     _gm_success "Renamed branch to main"
   fi
 }
@@ -219,8 +220,12 @@ _gm_init_repo() {
     branch=${branch:-main}
     if gum confirm "Push current branch '$branch' to origin?"; then
       _gm_initial_commit || { _gm_info "Push skipped — no initial commit."; return; }
-      gum spin --title "Pushing..." -- git push -u origin "$branch"
-      _gm_success "Pushed $branch to origin"
+      _gm_cmd push -u origin "$branch"
+      if gum spin --title "Pushing..." -- git push -u origin "$branch"; then
+        _gm_success "Pushed $branch to origin"
+      else
+        _gm_error "Push failed"
+      fi
     fi
   fi
 }
@@ -346,6 +351,11 @@ _gm_success() { gum style --foreground $_GM_SUCCESS "✔ $1"; }
 _gm_warn()    { gum style --foreground $_GM_WARN    "⚠ $1"; }
 _gm_error()   { gum style --foreground $_GM_ERROR   "✘ $1"; }
 _gm_info()    { gum style --foreground $_GM_SECONDARY "→ $1"; }
+
+# Print the git command about to run (for transparency), e.g. _gm_cmd push -u origin main
+_gm_cmd() { gum style --foreground $_GM_MUTED "\$ git $*"; }
+# Print + run a git action command in one call.
+_gm_run() { _gm_cmd "$@"; git "$@"; }
 
 # gum filter, but never fall back to the cwd file browser on empty input.
 _gm_filter() {
@@ -529,7 +539,7 @@ _gm_commit() {
 
   gum confirm "Commit with this message?" || return 1
 
-  if git commit -m "$full_msg"; then
+  if _gm_run commit -m "$full_msg"; then
     _gm_success "Committed: $full_msg"
   else
     _gm_error "Commit failed"
@@ -578,11 +588,12 @@ _gm_branch_switch() {
   dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
   if [[ "$dirty" -gt 0 ]]; then
     if gum confirm "You have uncommitted changes. Stash them before switching?"; then
+      _gm_cmd stash push -u -m "gg: switch to $branch"
       gum spin --title "Stashing..." -- git stash push -u -m "gg: switch to $branch" && stashed=1
     fi
   fi
 
-  if ! git checkout "$branch"; then
+  if ! _gm_run checkout "$branch"; then
     _gm_error "Checkout failed"
     [[ -n "$stashed" ]] && _gm_info "Your changes are stashed — 'git stash pop' to restore."
     return 1
@@ -591,6 +602,7 @@ _gm_branch_switch() {
 
   # Bring the stashed changes back onto the new branch if wanted.
   if [[ -n "$stashed" ]] && gum confirm "Restore your stashed changes here (stash pop)?"; then
+    _gm_cmd stash pop
     if gum spin --title "Popping stash..." -- git stash pop; then
       _gm_success "Stash applied"
     else
@@ -618,16 +630,20 @@ _gm_branch_create() {
       | sort -u \
       | _gm_filter --placeholder "Select base branch...")
     [[ -z "$base" ]] && return
-    git checkout -b "$name" "$base"
+    _gm_run checkout -b "$name" "$base"
     _gm_success "Created branch: $name (from $base)"
   else
-    git checkout -b "$name"
+    _gm_run checkout -b "$name"
     _gm_success "Created branch: $name (from $current)"
   fi
 
   if gum confirm "Push branch to remote?"; then
-    gum spin --title "Pushing..." -- git push -u origin "$name"
-    _gm_success "Pushed $name to origin"
+    _gm_cmd push -u origin "$name"
+    if gum spin --title "Pushing..." -- git push -u origin "$name"; then
+      _gm_success "Pushed $name to origin"
+    else
+      _gm_error "Push failed"
+    fi
   fi
 }
 
@@ -645,15 +661,23 @@ _gm_branch_rename() {
   # Note whether the branch tracks a remote before the rename drops it.
   git rev-parse --abbrev-ref --symbolic-full-name "$old@{u}" &>/dev/null 2>&1 && had_upstream=1
 
-  git branch -m "$old" "$new" || { _gm_error "Rename failed"; return 1; }
+  _gm_run branch -m "$old" "$new" || { _gm_error "Rename failed"; return 1; }
   _gm_success "Renamed branch: $old → $new"
 
   # Remote branches can't be renamed in place — push the new name and drop the
   # old one, then re-track upstream.
   if [[ -n "$had_upstream" ]] && gum confirm "Update remote: push '$new' and delete '$old' on origin?"; then
-    gum spin --title "Pushing $new..." -- git push -u origin "$new"
-    gum spin --title "Deleting old remote branch..." -- git push origin --delete "$old"
-    _gm_success "Remote updated: origin/$old → origin/$new"
+    _gm_cmd push -u origin "$new"
+    if ! gum spin --title "Pushing $new..." -- git push -u origin "$new"; then
+      _gm_error "Push of '$new' failed — remote not updated"
+      return 1
+    fi
+    _gm_cmd push origin --delete "$old"
+    if gum spin --title "Deleting old remote branch..." -- git push origin --delete "$old"; then
+      _gm_success "Remote updated: origin/$old → origin/$new"
+    else
+      _gm_warn "Pushed '$new' but failed to delete old remote branch '$old'"
+    fi
   fi
 }
 
@@ -667,12 +691,20 @@ _gm_branch_delete() {
 
   gum confirm "Delete local branch '$branch'?" || return
 
-  git branch -d "$branch"
-  _gm_success "Deleted local branch: $branch"
+  if _gm_run branch -d "$branch"; then
+    _gm_success "Deleted local branch: $branch"
+  else
+    _gm_error "Local delete failed (use --force?)"
+    return 1
+  fi
 
   if gum confirm "Delete remote branch '$branch' too?"; then
-    gum spin --title "Deleting remote..." -- git push origin --delete "$branch"
-    _gm_success "Deleted remote branch: $branch"
+    _gm_cmd push origin --delete "$branch"
+    if gum spin --title "Deleting remote..." -- git push origin --delete "$branch"; then
+      _gm_success "Deleted remote branch: $branch"
+    else
+      _gm_error "Remote delete failed"
+    fi
   fi
 }
 
@@ -747,12 +779,19 @@ _gm_tag_create() {
   echo ""
   gum confirm "Create tag '$tag'?" || return
 
-  git tag "$tag"
+  if ! _gm_run tag "$tag"; then
+    _gm_error "Tag creation failed"
+    return 1
+  fi
   _gm_success "Created tag: $tag"
 
   if gum confirm "Push tag to remote?"; then
-    gum spin --title "Pushing tag..." -- git push origin "$tag"
-    _gm_success "Pushed tag: $tag"
+    _gm_cmd push origin "$tag"
+    if gum spin --title "Pushing tag..." -- git push origin "$tag"; then
+      _gm_success "Pushed tag: $tag"
+    else
+      _gm_error "Push failed"
+    fi
   fi
 }
 
@@ -763,12 +802,19 @@ _gm_tag_delete() {
 
   gum confirm "Delete local tag '$tag'?" || return
 
-  git tag -d "$tag"
+  if ! _gm_run tag -d "$tag"; then
+    _gm_error "Local tag delete failed"
+    return 1
+  fi
   _gm_success "Deleted local tag: $tag"
 
   if gum confirm "Delete remote tag '$tag' too?"; then
-    gum spin --title "Deleting remote tag..." -- git push origin --delete "$tag"
-    _gm_success "Deleted remote tag: $tag"
+    _gm_cmd push origin --delete "$tag"
+    if gum spin --title "Deleting remote tag..." -- git push origin --delete "$tag"; then
+      _gm_success "Deleted remote tag: $tag"
+    else
+      _gm_error "Remote tag delete failed"
+    fi
   fi
 }
 
@@ -869,11 +915,11 @@ Path:   $wt_path"
   # Existing local branch → check it out; remote-only → create a tracking
   # local branch; otherwise create a fresh branch.
   if git show-ref --verify --quiet "refs/heads/$branch"; then
-    git worktree add "$wt_path" "$branch"
+    _gm_run worktree add "$wt_path" "$branch"
   elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
-    git worktree add "$wt_path" -b "$branch" "origin/$branch"
+    _gm_run worktree add "$wt_path" -b "$branch" "origin/$branch"
   else
-    git worktree add "$wt_path" -b "$branch"
+    _gm_run worktree add "$wt_path" -b "$branch"
   fi
   _gm_success "Worktree created at $wt_path"
 
@@ -908,7 +954,7 @@ Path:   $wt_path"
 
   gum confirm "Remove worktree at '$wt_path'?" || return
 
-  git worktree remove "$wt_path"
+  _gm_run worktree remove "$wt_path"
   _gm_success "Removed worktree: $wt_path"
 }
 
@@ -957,13 +1003,14 @@ _gm_refs() {
   local choice
   while true; do
     choice=$(gum choose --header "Refs:" \
-      " Branch|Branch" " Tag|Tag" " Worktree|Worktree" " Back|← Back")
+      " Branch|Branch" " Tag|Tag" " Worktree|Worktree" " Search|Search" " Back|← Back")
     [[ -z "$choice" || "${choice:l}" == "← back" || "${choice:l}" == "back" ]] && return
 
     case "$choice" in
       Branch)   _gm_branch ;;
       Tag)      _gm_tag ;;
       Worktree) _gm_worktree ;;
+      Search)   _gm_search ;;
     esac
   done
 }
@@ -976,71 +1023,92 @@ _gm_search() {
   _gm_require_repo || return
 
   local scope="$1"
-  if [[ -z "$scope" ]]; then
+
+  # A scope passed as an argument (e.g. 'gg search commits') runs once and exits;
+  # the interactive picker loops back to itself after each action.
+  if [[ -n "$scope" ]]; then
+    case "${scope:l}" in
+      commits)  _gm_search_commits ;;
+      branches) _gm_search_branches ;;
+      tags)     _gm_search_tags ;;
+      *) _gm_error "Unknown search scope: $scope" ;;
+    esac
+    return
+  fi
+
+  while true; do
     scope=$(gum choose --header "Search:" \
       " Commits|Commits" " Branches|Branches" " Tags|Tags" " Back|← Back")
-  fi
-  [[ -z "$scope" ]] && return
+    [[ -z "$scope" || "${scope:l}" == "← back" || "${scope:l}" == "back" ]] && return
 
-  case "${scope:l}" in
-    commits)  _gm_search_commits ;;
-    branches) _gm_search_branches ;;
-    tags)     _gm_search_tags ;;
-    "← back"|back) return ;;
-    *) _gm_error "Unknown search scope: $scope" ;;
-  esac
+    case "${scope:l}" in
+      commits)  _gm_search_commits ;;
+      branches) _gm_search_branches ;;
+      tags)     _gm_search_tags ;;
+      *) _gm_error "Unknown search scope: $scope" ;;
+    esac
+  done
 }
 
 _gm_search_commits() {
   local selected hash action
 
-  selected=$(git log --oneline --all | _gm_filter --placeholder "Search commits...")
-  [[ -z "$selected" ]] && return
+  while true; do
+    selected=$(git log --oneline --all | _gm_filter --placeholder "Search commits...")
+    [[ -z "$selected" ]] && return
 
-  hash=$(echo "$selected" | awk '{print $1}')
+    hash=$(echo "$selected" | awk '{print $1}')
 
-  action=$(gum choose --header "Action for $hash:" \
-    " Show Diff|Show Diff" " Show Files|Show Files" " Copy Hash|Copy Hash")
+    action=$(gum choose --header "Action for $hash:" \
+      " Show Diff|Show Diff" " Show Files|Show Files" " Copy Hash|Copy Hash" " Back|← Back")
+    [[ -z "$action" || "$action" == "← Back" ]] && continue
 
-  case "$action" in
-    "Show Diff")  git show "$hash" | gum pager ;;
-    "Show Files") git show --name-only "$hash" | gum pager ;;
-    "Copy Hash")  echo -n "$hash" | pbcopy && _gm_success "Hash copied: $hash" ;;
-  esac
+    case "$action" in
+      "Show Diff")  git show "$hash" | gum pager ;;
+      "Show Files") git show --name-only "$hash" | gum pager ;;
+      "Copy Hash")  echo -n "$hash" | pbcopy && _gm_success "Hash copied: $hash" ;;
+    esac
+  done
 }
 
 _gm_search_branches() {
   local branch action
 
-  branch=$(git branch -a \
-    | sed 's/^[+* ]*//' \
-    | _gm_filter --placeholder "Search branches...")
-  [[ -z "$branch" ]] && return
+  while true; do
+    branch=$(git branch -a \
+      | sed 's/^[+* ]*//' \
+      | _gm_filter --placeholder "Search branches...")
+    [[ -z "$branch" ]] && return
 
-  action=$(gum choose --header "Action for '$branch':" \
-    " Checkout|Checkout" " Show Commits|Show Commits" " Copy Name|Copy Name")
+    action=$(gum choose --header "Action for '$branch':" \
+      " Checkout|Checkout" " Show Commits|Show Commits" " Copy Name|Copy Name" " Back|← Back")
+    [[ -z "$action" || "$action" == "← Back" ]] && continue
 
-  case "$action" in
-    Checkout)       git checkout "${branch#remotes/origin/}" ;;
-    "Show Commits") git log --oneline "$branch" | gum pager ;;
-    "Copy Name")    echo -n "$branch" | pbcopy && _gm_success "Copied: $branch" ;;
-  esac
+    case "$action" in
+      Checkout)       _gm_run checkout "${branch#remotes/origin/}" ;;
+      "Show Commits") git log --oneline "$branch" | gum pager ;;
+      "Copy Name")    echo -n "$branch" | pbcopy && _gm_success "Copied: $branch" ;;
+    esac
+  done
 }
 
 _gm_search_tags() {
   local tag action
 
-  tag=$(git tag --sort=-v:refname | _gm_filter --no-fuzzy-sort --placeholder "Search tags...")
-  [[ -z "$tag" ]] && return
+  while true; do
+    tag=$(git tag --sort=-v:refname | _gm_filter --no-fuzzy-sort --placeholder "Search tags...")
+    [[ -z "$tag" ]] && return
 
-  action=$(gum choose --header "Action for '$tag':" \
-    " Show Details|Show Details" " Checkout|Checkout" " Copy Name|Copy Name")
+    action=$(gum choose --header "Action for '$tag':" \
+      " Show Details|Show Details" " Checkout|Checkout" " Copy Name|Copy Name" " Back|← Back")
+    [[ -z "$action" || "$action" == "← Back" ]] && continue
 
-  case "$action" in
-    "Show Details") git show "$tag" | gum pager ;;
-    Checkout)       git checkout "$tag" ;;
-    "Copy Name")    echo -n "$tag" | pbcopy && _gm_success "Copied: $tag" ;;
-  esac
+    case "$action" in
+      "Show Details") git show "$tag" | gum pager ;;
+      Checkout)       _gm_run checkout "$tag" ;;
+      "Copy Name")    echo -n "$tag" | pbcopy && _gm_success "Copied: $tag" ;;
+    esac
+  done
 }
 
 # ─────────────────────────────────────────────
@@ -1058,11 +1126,22 @@ _gm_fetch() {
   [[ -z "$scope" || "${scope:l}" == "← back" || "${scope:l}" == "back" ]] && return
 
   if [[ "${scope:l}" != "all remotes" && "${scope:l}" != "all" ]]; then
-    gum spin --title "Fetching origin..." -- git fetch --prune
+    _gm_cmd fetch --prune
+    if gum spin --title "Fetching origin..." -- git fetch --prune; then
+      _gm_success "Fetch complete"
+    else
+      _gm_error "Fetch failed"
+      return 1
+    fi
   else
-    gum spin --title "Fetching all remotes..." -- git fetch --all --prune
+    _gm_cmd fetch --all --prune
+    if gum spin --title "Fetching all remotes..." -- git fetch --all --prune; then
+      _gm_success "Fetch complete"
+    else
+      _gm_error "Fetch failed"
+      return 1
+    fi
   fi
-  _gm_success "Fetch complete"
 }
 
 _gm_pull() {
@@ -1076,11 +1155,22 @@ _gm_pull() {
   [[ -z "$mode" || "${mode:l}" == "← back" || "${mode:l}" == "back" ]] && return
 
   if [[ "${mode:l}" == "rebase" ]]; then
-    gum spin --title "Pulling (rebase)..." -- git pull --rebase
+    _gm_cmd pull --rebase
+    if gum spin --title "Pulling (rebase)..." -- git pull --rebase; then
+      _gm_success "Pull complete"
+    else
+      _gm_error "Pull failed — resolve conflicts or 'git rebase --abort'"
+      return 1
+    fi
   else
-    gum spin --title "Pulling (merge)..." -- git pull
+    _gm_cmd pull
+    if gum spin --title "Pulling (merge)..." -- git pull; then
+      _gm_success "Pull complete"
+    else
+      _gm_error "Pull failed — resolve conflicts or 'git merge --abort'"
+      return 1
+    fi
   fi
-  _gm_success "Pull complete"
 
   # A rebase/merge pull can leave local commits ahead of the remote — offer
   # to push them now.
@@ -1115,12 +1205,23 @@ _gm_push() {
   fi
 
   if [[ "${mode:l}" != "force with lease" && "${mode:l}" != "force" ]]; then
-    gum spin --title "Pushing..." -- git push "${push_target[@]}"
+    _gm_cmd push "${push_target[@]}"
+    if gum spin --title "Pushing..." -- git push "${push_target[@]}"; then
+      _gm_success "Push complete"
+    else
+      _gm_error "Push failed"
+      return 1
+    fi
   else
     gum confirm "Force push with lease? This rewrites remote history." || return
-    gum spin --title "Force pushing..." -- git push --force-with-lease "${push_target[@]}"
+    _gm_cmd push --force-with-lease "${push_target[@]}"
+    if gum spin --title "Force pushing..." -- git push --force-with-lease "${push_target[@]}"; then
+      _gm_success "Push complete"
+    else
+      _gm_error "Force push failed (lease rejected — remote moved, fetch and retry)"
+      return 1
+    fi
   fi
-  _gm_success "Push complete"
 }
 
 # ─────────────────────────────────────────────
@@ -1210,9 +1311,9 @@ _gm_run_merge() {
   local out rc
 
   case "${mode:l}" in
-    no-ff)  out=$(git merge --no-ff "$@" "$source" 2>&1); rc=$? ;;
-    squash) out=$(git merge --squash "$@" "$source" 2>&1); rc=$? ;;
-    *)      out=$(git merge "$@" "$source" 2>&1); rc=$? ;;
+    no-ff)  _gm_cmd merge --no-ff "$@" "$source"; out=$(git merge --no-ff "$@" "$source" 2>&1); rc=$? ;;
+    squash) _gm_cmd merge --squash "$@" "$source"; out=$(git merge --squash "$@" "$source" 2>&1); rc=$? ;;
+    *)      _gm_cmd merge "$@" "$source"; out=$(git merge "$@" "$source" 2>&1); rc=$? ;;
   esac
   [[ -n "$out" ]] && echo "$out"
 
@@ -1237,7 +1338,7 @@ _gm_run_merge() {
   if git rev-parse -q --verify MERGE_HEAD &>/dev/null 2>&1 || [[ -n "$(git ls-files -u 2>/dev/null)" ]]; then
     _gm_error "Merge hit conflicts."
     if gum confirm "Abort the merge?"; then
-      git merge --abort
+      _gm_run merge --abort
       _gm_warn "Merge aborted."
     else
       _gm_info "Resolve conflicts, then commit to finish the merge."
@@ -1302,7 +1403,7 @@ _gm_rebase() {
   echo ""
   gum confirm "Rebase '$current' onto '$onto'?" || return
 
-  if git rebase "$onto"; then
+  if _gm_run rebase "$onto"; then
     _gm_success "Rebased $current onto $onto"
     echo ""
     if gum confirm "Push rebased branch to remote now?"; then
@@ -1313,7 +1414,7 @@ _gm_rebase() {
   else
     _gm_error "Rebase hit conflicts."
     if gum confirm "Abort the rebase?"; then
-      git rebase --abort
+      _gm_run rebase --abort
       _gm_warn "Rebase aborted."
     else
       _gm_info "Resolve conflicts, then 'git rebase --continue' to finish."
@@ -1328,42 +1429,82 @@ _gm_rebase() {
 _gm_stage_commit() {
   _gm_require_repo || return
 
-  local action staged
+  local action
   while true; do
     action=$(gum choose \
       --header "Changes:" \
-      " Add (stage all files)|Add" \
+      " Add|Add" \
       " Remove from stage|Unstage" \
-      " Commit (staged files only)|Commit" \
-      " Undo Last Commit|Undo" \
+      " Commit|Commit" \
       " Push|Push" \
+      " Status|Status" \
       " Back|← Back")
     [[ -z "$action" || "$action" == "← Back" ]] && return
 
     case "$action" in
       Add)
-        git add -A
-        staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
-        if [[ "$staged" -eq 0 ]]; then
-          _gm_warn "Nothing to stage — working tree clean."
-        else
-          _gm_success "Staged $staged file(s)"
-        fi
+        _gm_add
         ;;
       Unstage)
         _gm_unstage
         ;;
       Commit)
-        _gm_commit
-        ;;
-      Undo)
-        _gm_undo_commit
+        _gm_commit_menu
         ;;
       Push)
         _gm_push
         ;;
+      Status)
+        _gm_status
+        ;;
     esac
   done
+}
+
+_gm_add() {
+  local scope staged selected
+
+  scope=$(gum choose --header "Add:" \
+    " All (stage every change)|All" \
+    " Select files|Select" \
+    " Back|← Back")
+  [[ -z "$scope" || "$scope" == "← Back" ]] && return
+
+  if [[ "$scope" == "All" ]]; then
+    _gm_run add -A
+  else
+    local files
+    files=$(git status --porcelain 2>/dev/null | cut -c4-)
+    if [[ -z "$files" ]]; then
+      _gm_warn "Nothing to stage — working tree clean."
+      return
+    fi
+    selected=$(echo "$files" | gum filter --no-limit --placeholder "Select files to stage (TAB to multi-select)...")
+    [[ -z "$selected" ]] && return
+    _gm_cmd add "$selected"
+    echo "$selected" | xargs git add
+  fi
+
+  staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
+  if [[ "$staged" -eq 0 ]]; then
+    _gm_warn "Nothing to stage — working tree clean."
+  else
+    _gm_success "Staged $staged file(s)"
+  fi
+}
+
+_gm_commit_menu() {
+  local action
+  action=$(gum choose --header "Commit:" \
+    " Commit (staged files only)|Commit" \
+    " Undo Last Commit|Undo" \
+    " Back|← Back")
+  [[ -z "$action" || "$action" == "← Back" ]] && return
+
+  case "$action" in
+    Commit) _gm_commit ;;
+    Undo)   _gm_undo_commit ;;
+  esac
 }
 
 _gm_unstage() {
@@ -1378,6 +1519,7 @@ _gm_unstage() {
   selected=$(echo "$files" | gum filter --no-limit --placeholder "Select files to unstage (TAB to multi-select)...")
   [[ -z "$selected" ]] && return
 
+  _gm_cmd restore --staged "$selected"
   echo "$selected" | xargs git restore --staged
   _gm_success "Unstaged selected file(s)"
 }
@@ -1405,8 +1547,86 @@ _gm_undo_commit() {
     gum confirm "Hard reset will permanently discard all changes from this commit. Continue?" || return
   fi
 
-  git reset --"$mode" HEAD~1
+  _gm_run reset --"$mode" HEAD~1
   _gm_success "Undid last commit ($mode)"
+}
+
+# ─────────────────────────────────────────────
+# History  (Log / Reset / Restore)
+# ─────────────────────────────────────────────
+
+_gm_history() {
+  _gm_require_repo || return
+
+  local action
+  while true; do
+    action=$(gum choose \
+      --header "History:" \
+      " Log (follow a file)|Log" \
+      " Reset (to any commit)|Reset" \
+      " Restore (file from commit)|Restore" \
+      " Back|← Back")
+    [[ -z "$action" || "$action" == "← Back" ]] && return
+
+    case "$action" in
+      Log)     _gm_log_follow ;;
+      Reset)   _gm_reset_to ;;
+      Restore) _gm_restore_file ;;
+    esac
+  done
+}
+
+_gm_log_follow() {
+  local file
+  file=$(git ls-files | _gm_filter --placeholder "Select file to follow...")
+  [[ -z "$file" ]] && return
+  git log --follow --oneline -- "$file" | gum pager
+}
+
+_gm_reset_to() {
+  local commit mode
+
+  commit=$(git log --oneline -50 | _gm_filter --placeholder "Select commit to reset to...")
+  [[ -z "$commit" ]] && return
+  commit=$(echo "$commit" | awk '{print $1}')
+
+  gum style --border rounded --padding "0 1" --border-foreground $_GM_WARN \
+    "Reset HEAD to: $(git log -1 --oneline "$commit")"
+  echo ""
+
+  mode=$(gum choose --header "Reset mode:" \
+    " Soft (keep changes staged)|soft" \
+    " Mixed (keep changes unstaged)|mixed" \
+    " Hard (discard all changes)|hard")
+  [[ -z "$mode" ]] && return
+
+  if [[ "$mode" == "hard" ]]; then
+    gum confirm "Hard reset will permanently discard everything after this commit. Continue?" || return
+  fi
+
+  if _gm_run reset --"$mode" "$commit"; then
+    _gm_success "Reset to $commit ($mode)"
+  else
+    _gm_error "Reset failed"
+  fi
+}
+
+_gm_restore_file() {
+  local commit files selected
+
+  commit=$(git log --oneline -50 | _gm_filter --placeholder "Select commit to restore files from...")
+  [[ -z "$commit" ]] && return
+  commit=$(echo "$commit" | awk '{print $1}')
+
+  files=$(git ls-tree -r --name-only "$commit")
+  [[ -z "$files" ]] && { _gm_warn "No files in that commit."; return; }
+
+  selected=$(echo "$files" | gum filter --no-limit --placeholder "Select files to restore from $commit (TAB to multi-select)...")
+  [[ -z "$selected" ]] && return
+
+  _gm_cmd restore --source "$commit" -- "$selected"
+  echo "$selected" | xargs git restore --source "$commit" --
+  _gm_success "Restored selected file(s) from $commit"
 }
 
 # ─────────────────────────────────────────────
@@ -1417,7 +1637,7 @@ _gm_ship() {
   _gm_require_repo || return
 
   local staged
-  git add -A
+  _gm_run add -A
   staged=$(git diff --cached --name-only | wc -l | tr -d ' ')
   if [[ "$staged" -eq 0 ]]; then
     _gm_warn "Nothing to commit — working tree clean."
@@ -1469,15 +1689,16 @@ _gm_usage() {
     "  gg ship                      add . → commit → push
   gg commit                    Stage all + conventional commit (no push)
   gg push     [push|force]
-  gg refs                      Branch / Tag / Worktree menu
+  gg refs                      Branch / Tag / Worktree / Search menu
   gg branch   [list [local|remote|all]|switch|create|rename|delete]
   gg tag      [list|create|delete]
   gg worktree [create|delete|open|list]
   gg search   [commits|branches|tags]
-  gg status                    Repo status
+  gg status                    Repo status (also under Changes)
   gg fetch    [origin|all]
   gg pull     [rebase|merge]
   gg sync                      Merge / Rebase menu
+  gg history                   Log / Reset / Restore menu
   gg merge    [<branch>]       Merge a branch into current
   gg rebase   [<branch>]       Rebase current onto a branch
   gg init                      Initialize git here
@@ -1503,6 +1724,7 @@ _gm_dispatch() {
     pull)               _gm_pull "$@" ;;
     push|p)             _gm_push "$@" ;;
     sync|integrate|i)   _gm_integrate ;;
+    history|hist)       _gm_history ;;
     merge|m)            _gm_merge "$@" ;;
     rebase|rb)          _gm_rebase "$@" ;;
     init)               _gm_init_repo ;;
@@ -1542,10 +1764,9 @@ gg() {
       " Fetch|Fetch" \
       " Ship (add → commit → push)|Ship" \
       " Changes|Changes" \
-      " Search|Search" \
       " Refs|Refs" \
       " Sync|Sync" \
-      " Status|Status" \
+      " History|History" \
       " Remote|Remote" \
       " Quit|Quit")
     # Empty (Esc) or Quit exits the manager.
@@ -1561,9 +1782,8 @@ gg() {
       Ship)     _gm_ship ;;
       Changes)  _gm_stage_commit ;;
       Refs)     _gm_refs ;;
-      Search)   _gm_search ;;
       Sync)     _gm_integrate ;;
-      Status)   _gm_status ;;
+      History)  _gm_history ;;
       Remote)   _gm_remote ;;
     esac
   done
