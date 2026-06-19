@@ -556,22 +556,37 @@ _gm_branch() {
 
   local action="$1"
   [[ $# -gt 0 ]] && shift
-  if [[ -z "$action" ]]; then
+
+  # A scope passed as an argument (e.g. 'gg branch create') runs once and exits;
+  # the interactive picker loops back to itself after each action.
+  if [[ -n "$action" ]]; then
+    case "${action:l}" in
+      list)     _gm_branch_list "$@" ;;
+      switch)   _gm_branch_switch ;;
+      create)   _gm_branch_create ;;
+      rename)   _gm_branch_rename ;;
+      delete)   _gm_branch_delete ;;
+      "← back"|back) return ;;
+      *) _gm_error "Unknown branch action: $action" ;;
+    esac
+    return
+  fi
+
+  while true; do
     action=$(gum choose \
       --header "Branch:" \
       " List|List" " Switch|Switch" " Create|Create" " Rename|Rename" " Delete|Delete" " Back|← Back")
-  fi
-  [[ -z "$action" ]] && return
+    [[ -z "$action" || "${action:l}" == "← back" || "${action:l}" == "back" ]] && return
 
-  case "${action:l}" in
-    list)     _gm_branch_list "$@" ;;
-    switch)   _gm_branch_switch ;;
-    create)   _gm_branch_create ;;
-    rename)   _gm_branch_rename ;;
-    delete)   _gm_branch_delete ;;
-    "← back"|back) return ;;
-    *) _gm_error "Unknown branch action: $action" ;;
-  esac
+    case "${action:l}" in
+      list)     _gm_branch_list ;;
+      switch)   _gm_branch_switch ;;
+      create)   _gm_branch_create ;;
+      rename)   _gm_branch_rename ;;
+      delete)   _gm_branch_delete ;;
+      *) _gm_error "Unknown branch action: $action" ;;
+    esac
+  done
 }
 
 _gm_branch_switch() {
@@ -753,20 +768,31 @@ _gm_tag() {
   _gm_require_repo || return
 
   local action="$1"
-  if [[ -z "$action" ]]; then
+
+  if [[ -n "$action" ]]; then
+    case "${action:l}" in
+      list)            _gm_tag_list ;;
+      add|create)      _gm_tag_create ;;
+      remove|delete)   _gm_tag_delete ;;
+      "← back"|back) return ;;
+      *) _gm_error "Unknown tag action: $action" ;;
+    esac
+    return
+  fi
+
+  while true; do
     action=$(gum choose \
       --header "Tag:" \
       " List|List" " Add|Add" " Remove|Remove" " Back|← Back")
-  fi
-  [[ -z "$action" ]] && return
+    [[ -z "$action" || "${action:l}" == "← back" || "${action:l}" == "back" ]] && return
 
-  case "${action:l}" in
-    list)            _gm_tag_list ;;
-    add|create)      _gm_tag_create ;;
-    remove|delete)   _gm_tag_delete ;;
-    "← back"|back) return ;;
-    *) _gm_error "Unknown tag action: $action" ;;
-  esac
+    case "${action:l}" in
+      list)            _gm_tag_list ;;
+      add|create)      _gm_tag_create ;;
+      remove|delete)   _gm_tag_delete ;;
+      *) _gm_error "Unknown tag action: $action" ;;
+    esac
+  done
 }
 
 _gm_tag_create() {
@@ -842,21 +868,33 @@ _gm_worktree() {
   _gm_require_repo || return
 
   local action="$1"
-  if [[ -z "$action" ]]; then
+
+  if [[ -n "$action" ]]; then
+    case "${action:l}" in
+      add|create)      _gm_worktree_create ;;
+      remove|delete)   _gm_worktree_delete ;;
+      open)     _gm_worktree_open ;;
+      list)     _gm_worktree_list ;;
+      "← back"|back) return ;;
+      *) _gm_error "Unknown worktree action: $action" ;;
+    esac
+    return
+  fi
+
+  while true; do
     action=$(gum choose \
       --header "Worktree:" \
       " List|List" " Add|Add" " Remove|Remove" " Open|Open" " Back|← Back")
-  fi
-  [[ -z "$action" ]] && return
+    [[ -z "$action" || "${action:l}" == "← back" || "${action:l}" == "back" ]] && return
 
-  case "${action:l}" in
-    add|create)      _gm_worktree_create ;;
-    remove|delete)   _gm_worktree_delete ;;
-    open)     _gm_worktree_open ;;
-    list)     _gm_worktree_list ;;
-    "← back"|back) return ;;
-    *) _gm_error "Unknown worktree action: $action" ;;
-  esac
+    case "${action:l}" in
+      add|create)      _gm_worktree_create ;;
+      remove|delete)   _gm_worktree_delete ;;
+      open)     _gm_worktree_open ;;
+      list)     _gm_worktree_list ;;
+      *) _gm_error "Unknown worktree action: $action" ;;
+    esac
+  done
 }
 
 _gm_worktree_create() {
@@ -961,8 +999,8 @@ Path:   $wt_path"
 _gm_worktree_open() {
   local selected wt_path branch action worktrees
 
-  worktrees=$(git worktree list | tail -n +2)
-  [[ -z "$worktrees" ]] && { _gm_warn "No additional worktrees."; return; }
+  worktrees=$(git worktree list)
+  [[ -z "$worktrees" ]] && { _gm_warn "No worktrees found."; return; }
 
   selected=$(echo "$worktrees" | _gm_filter --placeholder "Select worktree to open...")
   [[ -z "$selected" ]] && return
