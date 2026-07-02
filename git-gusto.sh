@@ -298,6 +298,22 @@ _GM_SUCCESS=84     # green
 _GM_WARN=215       # orange
 _GM_ERROR=203      # red
 _GM_MUTED=245      # gray
+_GM_BG=235         # dark gray — gum widget text background
+_GM_FG=254         # off-white — gum widget text foreground
+_GM_BG_HEX="#262626"  # same dark gray, for the terminal-wide background (OSC 11)
+_GM_FG_HEX="#e4e4e4"  # same off-white, for the terminal-wide foreground (OSC 10)
+
+# Paint the whole terminal background/foreground for the duration of gg().
+# Best-effort: OSC 10/11 are ignored by terminals that don't support them.
+_gm_term_theme_start() {
+  printf '\033]11;%s\007' "$_GM_BG_HEX"
+  printf '\033]10;%s\007' "$_GM_FG_HEX"
+}
+# Restore the terminal's own default colors (OSC 110/111 reset codes).
+_gm_term_theme_reset() {
+  printf '\033]111\007'
+  printf '\033]110\007'
+}
 
 # Theme every gum component once via its env vars. Called at the top of gg().
 _gm_theme() {
@@ -306,6 +322,7 @@ _gm_theme() {
   export GUM_CHOOSE_CURSOR_FOREGROUND=$_GM_PRIMARY
   export GUM_CHOOSE_HEADER_FOREGROUND=$_GM_SECONDARY
   export GUM_CHOOSE_SELECTED_FOREGROUND=$_GM_PRIMARY
+  export GUM_CHOOSE_ITEM_FOREGROUND=$_GM_FG
   export GUM_CHOOSE_HEIGHT=12
   export GUM_CHOOSE_LABEL_DELIMITER="|"   # items as "label|value"
 
@@ -316,6 +333,7 @@ _gm_theme() {
   export GUM_FILTER_PROMPT_FOREGROUND=$_GM_SECONDARY
   export GUM_FILTER_MATCH_FOREGROUND=$_GM_PRIMARY
   export GUM_FILTER_HEADER_FOREGROUND=$_GM_SECONDARY
+  export GUM_FILTER_TEXT_FOREGROUND=$_GM_FG
   export GUM_FILTER_HEIGHT=15
 
   # input
@@ -335,6 +353,7 @@ _gm_theme() {
 
   # pager
   export GUM_PAGER_HELP_FOREGROUND=$_GM_MUTED
+  export GUM_PAGER_FOREGROUND=$_GM_FG
 }
 
 _gm_header() {
@@ -1888,9 +1907,13 @@ _gm_dispatch() {
 }
 
 gg() {
+  setopt localtraps
   _gm_require_gum || return
   _gm_theme
   _gm_require_git || return
+
+  _gm_term_theme_start
+  trap '_gm_term_theme_reset' EXIT INT TERM
 
   # Direct subcommand mode: 'gg <command> [sub-action]'.
   if [[ -n "$1" ]]; then

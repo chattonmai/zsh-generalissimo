@@ -20,6 +20,22 @@ _SG_SUCCESS=84     # green
 _SG_WARN=215       # orange
 _SG_ERROR=203      # red
 _SG_MUTED=245      # gray
+_SG_BG=235         # dark gray — gum widget text background
+_SG_FG=254         # off-white — gum widget text foreground
+_SG_BG_HEX="#262626"  # same dark gray, for the terminal-wide background (OSC 11)
+_SG_FG_HEX="#e4e4e4"  # same off-white, for the terminal-wide foreground (OSC 10)
+
+# Paint the whole terminal background/foreground for the duration of ssi().
+# Best-effort: OSC 10/11 are ignored by terminals that don't support them.
+_sg_term_theme_start() {
+  printf '\033]11;%s\007' "$_SG_BG_HEX"
+  printf '\033]10;%s\007' "$_SG_FG_HEX"
+}
+# Restore the terminal's own default colors (OSC 110/111 reset codes).
+_sg_term_theme_reset() {
+  printf '\033]111\007'
+  printf '\033]110\007'
+}
 
 _SG_CONFIG="$HOME/.ssh/config"
 _SG_SSH_DIR="$HOME/.ssh"
@@ -42,6 +58,7 @@ _sg_theme() {
   export GUM_CHOOSE_CURSOR_FOREGROUND=$_SG_PRIMARY
   export GUM_CHOOSE_HEADER_FOREGROUND=$_SG_SECONDARY
   export GUM_CHOOSE_SELECTED_FOREGROUND=$_SG_PRIMARY
+  export GUM_CHOOSE_ITEM_FOREGROUND=$_SG_FG
   export GUM_CHOOSE_HEIGHT=12
   export GUM_CHOOSE_LABEL_DELIMITER="|"
 
@@ -51,6 +68,7 @@ _sg_theme() {
   export GUM_FILTER_PROMPT_FOREGROUND=$_SG_SECONDARY
   export GUM_FILTER_MATCH_FOREGROUND=$_SG_PRIMARY
   export GUM_FILTER_HEADER_FOREGROUND=$_SG_SECONDARY
+  export GUM_FILTER_TEXT_FOREGROUND=$_SG_FG
   export GUM_FILTER_HEIGHT=15
 
   export GUM_INPUT_PROMPT="❯ "
@@ -66,6 +84,7 @@ _sg_theme() {
   export GUM_SPIN_TITLE_FOREGROUND=$_SG_SECONDARY
 
   export GUM_PAGER_HELP_FOREGROUND=$_SG_MUTED
+  export GUM_PAGER_FOREGROUND=$_SG_FG
 }
 
 # Status helpers degrade to plain echo if gum isn't reachable, so a missing gum
@@ -735,8 +754,12 @@ _sg_menu() {
 }
 
 ssi() {
+  setopt localtraps
   _sg_require_gum || return
   _sg_theme
+
+  _sg_term_theme_start
+  trap '_sg_term_theme_reset' EXIT INT TERM
 
   case "$1" in
     -h|--help|help) _sg_usage; return ;;
