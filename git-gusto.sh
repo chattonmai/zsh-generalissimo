@@ -313,6 +313,13 @@ _gm_term_theme_start() {
 _gm_term_theme_reset() {
   printf '\033]111\007'
   printf '\033]110\007'
+  # Nudge a repaint: single-cell nudges (cursor toggle, blank line, a
+  # printed-then-erased glyph) don't force Ghostty to redraw the rest of
+  # the visible viewport — only editing a cell's content invalidates its
+  # cached color. Toggling the alternate screen buffer forces a full,
+  # non-destructive redraw of the primary screen on return (the same
+  # mechanism vim/less/tmux rely on), without erasing any content.
+  printf '\033[?1049h\033[?1049l'
 }
 
 # Theme every gum component once via its env vars. Called at the top of gg().
