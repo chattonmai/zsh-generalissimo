@@ -511,11 +511,41 @@ _gm_status() {
 _gm_commit() {
   _gm_require_repo || return
 
-  local branch type msg full_msg
+  local branch type msg full_msg git_dir merge_msg_file
 
   branch=$(_gm_current_branch)
   _gm_header "Commit — $branch"
   echo ""
+
+  # A merge conflict (MERGE_HEAD) or a pending squash (SQUASH_MSG) already has
+  # a git-authored message on disk — surface it instead of building a fresh
+  # conventional-commit message from scratch, which would silently discard it.
+  git_dir=$(git rev-parse --git-dir)
+  if git rev-parse -q --verify MERGE_HEAD &>/dev/null; then
+    merge_msg_file="$git_dir/MERGE_MSG"
+  elif [[ -f "$git_dir/SQUASH_MSG" ]]; then
+    merge_msg_file="$git_dir/SQUASH_MSG"
+  fi
+
+  if [[ -n "$merge_msg_file" && -f "$merge_msg_file" ]]; then
+    msg=$(grep -v '^#' "$merge_msg_file" | grep -v '^[[:space:]]*$' | head -1)
+    msg=$(gum input --placeholder "Commit message..." --value "$msg" --width 60)
+    [[ -z "$msg" ]] && return 1
+
+    echo ""
+    gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY "$msg"
+    echo ""
+
+    gum confirm "Commit with this message?" || return 1
+
+    if _gm_run commit -m "$msg"; then
+      _gm_success "Committed: $msg"
+    else
+      _gm_error "Commit failed"
+      return 1
+    fi
+    return
+  fi
 
   type=$(gum choose \
     --header "Select commit type:" \
@@ -697,14 +727,57 @@ _gm_branch_rename() {
 }
 
 _gm_branch_delete() {
-  local branch
-  branch=$(git branch \
-    | grep -v '^\*' \
-    | sed 's/^[+* ]*//' \
-    | _gm_filter --placeholder "Select branch to delete...")
-  [[ -z "$branch" ]] && return
+  local scope branch
 
-  gum confirm "Delete local branch '$branch'?" || return
+  while true; do
+    scope=$(gum choose --header "Delete from:" \
+      " Local|Local" " Remote|Remote" " All|All" " Back|← Back")
+    [[ -z "$scope" || "${scope:l}" == "← back" || "${scope:l}" == "back" ]] && return
+
+    case "${scope:l}" in
+      local)
+        branch=$(git branch \
+          | grep -v '^\*' \
+          | sed 's/^[+* ]*//' \
+          | _gm_filter --placeholder "Select local branch to delete...")
+        [[ -z "$branch" ]] && continue
+        _gm_branch_delete_local "$branch" && _gm_branch_delete_remote_prompt "$branch"
+        ;;
+      remote)
+        branch=$(git branch -r \
+          | grep -v HEAD | sed 's|^[[:space:]]*origin/||' \
+          | sort -u \
+          | _gm_filter --placeholder "Select remote branch to delete...")
+        [[ -z "$branch" ]] && continue
+        _gm_branch_delete_remote "$branch"
+        ;;
+      all)
+        local local_branches remote_branches combined selection kind
+        local_branches=$(git branch | grep -v '^\*' | sed 's/^[+* ]*//')
+        remote_branches=$(git branch -r | grep -v HEAD | sed 's|^[[:space:]]*origin/||' | sort -u)
+        combined=$(
+          [[ -n "$local_branches" ]] && printf "%s\n" "$local_branches" | sed 's/^/[local]  /'
+          [[ -n "$remote_branches" ]] && printf "%s\n" "$remote_branches" | sed 's/^/[remote] /'
+        )
+        selection=$(echo "$combined" | _gm_filter --placeholder "Select branch to delete...")
+        [[ -z "$selection" ]] && continue
+
+        kind="${selection%%]*}]"
+        branch="${selection#*] }"; branch="${branch## }"
+
+        if [[ "$kind" == "[local]" ]]; then
+          _gm_branch_delete_local "$branch" && _gm_branch_delete_remote_prompt "$branch"
+        else
+          _gm_branch_delete_remote "$branch"
+        fi
+        ;;
+    esac
+  done
+}
+
+_gm_branch_delete_local() {
+  local branch="$1"
+  gum confirm "Delete local branch '$branch'?" || return 1
 
   if _gm_run branch -d "$branch"; then
     _gm_success "Deleted local branch: $branch"
@@ -712,14 +785,25 @@ _gm_branch_delete() {
     _gm_error "Local delete failed (use --force?)"
     return 1
   fi
+}
 
-  if gum confirm "Delete remote branch '$branch' too?"; then
-    _gm_cmd push origin --delete "$branch"
-    if gum spin --title "Deleting remote..." -- git push origin --delete "$branch"; then
-      _gm_success "Deleted remote branch: $branch"
-    else
-      _gm_error "Remote delete failed"
-    fi
+_gm_branch_delete_remote_prompt() {
+  local branch="$1"
+  gum confirm "Delete remote branch '$branch' too?" && _gm_branch_delete_remote "$branch" --no-confirm
+}
+
+_gm_branch_delete_remote() {
+  local branch="$1"
+  if [[ "$2" != "--no-confirm" ]]; then
+    gum confirm "Delete remote branch '$branch'?" || return 1
+  fi
+
+  _gm_cmd push origin --delete "$branch"
+  if gum spin --title "Deleting remote..." -- git push origin --delete "$branch"; then
+    _gm_success "Deleted remote branch: $branch"
+  else
+    _gm_error "Remote delete failed"
+    return 1
   fi
 }
 
@@ -1192,19 +1276,38 @@ _gm_pull() {
   fi
   [[ -z "$mode" || "${mode:l}" == "← back" || "${mode:l}" == "back" ]] && return
 
+  local tmpout out
+  tmpout=$(mktemp)
+
   if [[ "${mode:l}" == "rebase" ]]; then
     _gm_cmd pull --rebase
-    if gum spin --title "Pulling (rebase)..." -- git pull --rebase; then
-      _gm_success "Pull complete"
+    if gum spin --title "Pulling (rebase)..." -- zsh -c "git pull --rebase > '$tmpout' 2>&1"; then
+      out=$(<"$tmpout"); rm -f "$tmpout"
+      [[ -n "$out" ]] && echo "$out"
+      if echo "$out" | grep -qi "already up to date"; then
+        _gm_info "Already up to date."
+      else
+        _gm_success "Pull complete"
+      fi
     else
+      out=$(<"$tmpout"); rm -f "$tmpout"
+      [[ -n "$out" ]] && echo "$out"
       _gm_error "Pull failed — resolve conflicts or 'git rebase --abort'"
       return 1
     fi
   else
     _gm_cmd pull
-    if gum spin --title "Pulling (merge)..." -- git pull; then
-      _gm_success "Pull complete"
+    if gum spin --title "Pulling (merge)..." -- zsh -c "git pull > '$tmpout' 2>&1"; then
+      out=$(<"$tmpout"); rm -f "$tmpout"
+      [[ -n "$out" ]] && echo "$out"
+      if echo "$out" | grep -qi "already up to date"; then
+        _gm_info "Already up to date."
+      else
+        _gm_success "Pull complete"
+      fi
     else
+      out=$(<"$tmpout"); rm -f "$tmpout"
+      [[ -n "$out" ]] && echo "$out"
       _gm_error "Pull failed — resolve conflicts or 'git merge --abort'"
       return 1
     fi
@@ -1309,19 +1412,19 @@ _gm_merge() {
 
     case "${scope:l}" in
       local)
-        source=$(git branch \
+        source=$(git branch --sort=-committerdate \
           | grep -v HEAD | sed 's/^[+* ]*//' \
           | grep -vx "$current" \
           | _gm_filter --placeholder "Search branch to merge into $current...") ;;
       remote)
-        source=$(git branch -r \
+        source=$(git branch -r --sort=-committerdate \
           | grep -v HEAD | sed 's|^[[:space:]]*origin/||' \
-          | sort -u | grep -vx "$current" \
+          | grep -vx "$current" \
           | _gm_filter --placeholder "Search remote branch to merge into $current...") ;;
       all)
-        source=$(git branch --all \
+        source=$(git branch --all --sort=-committerdate \
           | grep -v HEAD | sed 's/^[+* ]*//' | sed 's|remotes/origin/||' \
-          | sort -u | grep -vx "$current" \
+          | grep -vx "$current" | awk '!seen[$0]++' \
           | _gm_filter --placeholder "Search branch to merge into $current...") ;;
     esac
   fi
@@ -1356,7 +1459,9 @@ _gm_run_merge() {
   [[ -n "$out" ]] && echo "$out"
 
   if [[ $rc -eq 0 ]]; then
-    if [[ "${mode:l}" == "squash" ]]; then
+    if echo "$out" | grep -qi "already up to date"; then
+      _gm_info "'$current' is already up to date with '$source' — nothing to merge."
+    elif [[ "${mode:l}" == "squash" ]]; then
       _gm_info "Squashed '$source' — changes staged, commit when ready."
     else
       _gm_success "Merged $source into $current"
@@ -1417,19 +1522,19 @@ _gm_rebase() {
 
     case "${scope:l}" in
       local)
-        onto=$(git branch \
+        onto=$(git branch --sort=-committerdate \
           | grep -v HEAD | sed 's/^[+* ]*//' \
           | grep -vx "$current" \
           | _gm_filter --placeholder "Rebase $current onto...") ;;
       remote)
-        onto=$(git branch -r \
+        onto=$(git branch -r --sort=-committerdate \
           | grep -v HEAD | sed 's|^[[:space:]]*origin/||' \
-          | sort -u | grep -vx "$current" \
+          | grep -vx "$current" \
           | _gm_filter --placeholder "Rebase $current onto...") ;;
       all)
-        onto=$(git branch --all \
+        onto=$(git branch --all --sort=-committerdate \
           | grep -v HEAD | sed 's/^[+* ]*//' | sed 's|remotes/origin/||' \
-          | sort -u | grep -vx "$current" \
+          | grep -vx "$current" | awk '!seen[$0]++' \
           | _gm_filter --placeholder "Rebase $current onto...") ;;
     esac
   fi
@@ -1441,13 +1546,22 @@ _gm_rebase() {
   echo ""
   gum confirm "Rebase '$current' onto '$onto'?" || return
 
-  if _gm_run rebase "$onto"; then
-    _gm_success "Rebased $current onto $onto"
-    echo ""
-    if gum confirm "Push rebased branch to remote now?"; then
-      _gm_push
+  local out rc
+  _gm_cmd rebase "$onto"
+  out=$(git rebase "$onto" 2>&1); rc=$?
+  [[ -n "$out" ]] && echo "$out"
+
+  if [[ $rc -eq 0 ]]; then
+    if echo "$out" | grep -qi "up to date"; then
+      _gm_info "'$current' is already up to date with '$onto' — nothing to rebase."
     else
-      _gm_info "Rebased but not pushed."
+      _gm_success "Rebased $current onto $onto"
+      echo ""
+      if gum confirm "Push rebased branch to remote now?"; then
+        _gm_push
+      else
+        _gm_info "Rebased but not pushed."
+      fi
     fi
   else
     _gm_error "Rebase hit conflicts."
