@@ -1912,8 +1912,11 @@ _gm_ship() {
 
   _gm_commit || { _gm_warn "Ship aborted — nothing pushed."; return; }
   echo ""
-  gum confirm "Push to remote now?" || { _gm_info "Committed but not pushed."; return; }
-  _gm_push
+  local mode
+  mode=$(gum choose --header "Push:" \
+    " Push|Push" " Force With Lease|Force With Lease" " Skip|Skip")
+  [[ -z "$mode" || "${mode:l}" == "skip" ]] && { _gm_info "Committed but not pushed."; return; }
+  _gm_push "$mode"
 }
 
 # ─────────────────────────────────────────────
