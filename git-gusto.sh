@@ -318,7 +318,7 @@ _GM_FG_HEX_DARK="#e4e4e4"   # off-white — terminal-wide foreground, OSC 10 (da
 _GM_BG_HEX_DARK="#262626"   # dark gray — terminal-wide background, OSC 11 (dark theme)
 
 _GM_PRIMARY_LIGHT=213  # magenta — cursor, selected, accents (light theme)
-_GM_FG_LIGHT=238            # dark gray — gum widget text foreground (light theme)
+_GM_FG_LIGHT=235            # dark gray — gum widget text foreground (light theme)
 _GM_FG_HEX_LIGHT="#141414"  # dark gray — terminal-wide foreground, OSC 10 (light theme)
 _GM_BG_HEX_LIGHT="#FDFDFD"  # light gray — terminal-wide background, OSC 11 (light theme)
 
