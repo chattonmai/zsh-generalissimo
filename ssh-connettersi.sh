@@ -14,16 +14,83 @@
 # Styles / Theme  (shared palette with git-gusto)
 # ─────────────────────────────────────────────
 
-_SG_PRIMARY=212    # magenta — cursor, selected, accents
 _SG_SECONDARY=141  # purple  — headers, prompts
 _SG_SUCCESS=84     # green
 _SG_WARN=215       # orange
 _SG_ERROR=203      # red
 _SG_MUTED=245      # gray
 _SG_BG=235         # dark gray — gum widget text background
-_SG_FG=254         # off-white — gum widget text foreground
-_SG_BG_HEX="#262626"  # same dark gray, for the terminal-wide background (OSC 11)
-_SG_FG_HEX="#e4e4e4"  # same off-white, for the terminal-wide foreground (OSC 10)
+
+_SG_PRIMARY_DARK=213   # brighter magenta — cursor, selected, accents (dark theme)
+_SG_FG_DARK=254             # off-white — gum widget text foreground (dark theme)
+_SG_FG_HEX_DARK="#e4e4e4"   # off-white — terminal-wide foreground, OSC 10 (dark theme)
+_SG_BG_HEX_DARK="#262626"   # dark gray — terminal-wide background, OSC 11 (dark theme)
+
+_SG_PRIMARY_LIGHT=213  # magenta — cursor, selected, accents (light theme)
+_SG_FG_LIGHT=236            # dark gray — gum widget text foreground (light theme)
+_SG_FG_HEX_LIGHT="#141414"  # dark gray — terminal-wide foreground, OSC 10 (light theme)
+_SG_BG_HEX_LIGHT="#FDFDFD"  # light gray — terminal-wide background, OSC 11 (light theme)
+
+# Resolved per-run by _sg_apply_theme_pref (defaults to dark, today's behavior).
+_SG_PRIMARY=$_SG_PRIMARY_DARK
+_SG_FG=$_SG_FG_DARK
+_SG_FG_HEX=$_SG_FG_HEX_DARK
+_SG_BG_HEX=$_SG_BG_HEX_DARK
+
+# Per-terminal theme preference, keyed by $TERM_PROGRAM. Independent of gg's
+# preference file — a terminal may want different settings for each tool.
+_sg_theme_config_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/ssh-connettersi/theme.conf"; }
+
+# Prints "light" or "dark" if a preference is saved for this $TERM_PROGRAM, else nothing.
+_sg_theme_get_saved() {
+  local key="${TERM_PROGRAM:-unknown}" file=$(_sg_theme_config_file)
+  [[ -f "$file" ]] || return
+  awk -F= -v k="$key" '$1==k{print $2}' "$file" | tail -1
+}
+
+# value: "light" | "dark" | "auto" (auto = remove override, revert to default).
+_sg_theme_set_saved() {
+  local value="$1" key="${TERM_PROGRAM:-unknown}" file=$(_sg_theme_config_file)
+  mkdir -p "${file:h}"
+  local tmp="${file}.tmp.$$"
+  [[ -f "$file" ]] && grep -v "^${key}=" "$file" > "$tmp"
+  [[ "$value" != "auto" ]] && echo "${key}=${value}" >> "$tmp"
+  mv "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+}
+
+# Apply the saved preference (if any) for this terminal; default stays dark.
+_sg_apply_theme_pref() {
+  if [[ "$(_sg_theme_get_saved)" == "light" ]]; then
+    _SG_PRIMARY=$_SG_PRIMARY_LIGHT
+    _SG_FG=$_SG_FG_LIGHT
+    _SG_FG_HEX=$_SG_FG_HEX_LIGHT
+    _SG_BG_HEX=$_SG_BG_HEX_LIGHT
+  else
+    _SG_PRIMARY=$_SG_PRIMARY_DARK
+    _SG_FG=$_SG_FG_DARK
+    _SG_FG_HEX=$_SG_FG_HEX_DARK
+    _SG_BG_HEX=$_SG_BG_HEX_DARK
+  fi
+}
+
+_sg_theme_cmd() {
+  local action="${1:l}"
+  case "$action" in
+    light|dark)
+      _sg_theme_set_saved "$action"
+      _sg_success "Theme set to '$action' for ${TERM_PROGRAM:-this terminal}."
+      ;;
+    auto|reset)
+      _sg_theme_set_saved "auto"
+      _sg_success "Theme reset to default (dark) for ${TERM_PROGRAM:-this terminal}."
+      ;;
+    "")
+      local saved=$(_sg_theme_get_saved)
+      _sg_info "Current terminal (${TERM_PROGRAM:-unknown}): ${saved:-dark (default)}"
+      ;;
+    *) _sg_error "Usage: ssi theme [light|dark|auto]" ;;
+  esac
+}
 
 # Paint the whole terminal background/foreground for the duration of ssi().
 # Best-effort: OSC 10/11 are ignored by terminals that don't support them.
@@ -49,6 +116,7 @@ _SG_SSH_DIR="$HOME/.ssh"
 
 # Session cache of host aliases. Cleared by Config → Reload.
 _SG_HOSTS=""
+_SG_HOSTS_INTERACTIVE=""
 
 # Make Homebrew (gum) and /usr/local (kiro) bins reachable even in shells where
 # brew shellenv never ran (non-login shells, script execution). Idempotent.
@@ -200,6 +268,18 @@ _sg_host_aliases() {
   print -r -- "$_SG_HOSTS"
 }
 
+# Same as _sg_host_aliases but drops git-remote-only hosts (see
+# _sg_is_git_remote_host) — used by the Connect picker only.
+_sg_host_aliases_interactive() {
+  [[ -n "$_SG_HOSTS_INTERACTIVE" ]] && { print -r -- "$_SG_HOSTS_INTERACTIVE"; return; }
+  local alias out=()
+  while IFS= read -r alias; do
+    _sg_is_git_remote_host "$alias" || out+=("$alias")
+  done < <(_sg_host_aliases)
+  _SG_HOSTS_INTERACTIVE=$(print -rl -- "${out[@]}")
+  print -r -- "$_SG_HOSTS_INTERACTIVE"
+}
+
 # Effective hostname/user/port/identityfile for an alias, via `ssh -G`.
 # Sets globals: _SG_D_HOST _SG_D_USER _SG_D_PORT _SG_D_KEY
 _sg_host_detail() {
@@ -215,11 +295,26 @@ _sg_host_detail() {
   done < <(ssh -G "$alias" 2>/dev/null)
 }
 
+# True if <alias>'s effective User is "git" — a git-remote-only alias
+# (GitHub/Bitbucket/GitLab-style), not an interactive shell server.
+_sg_is_git_remote_host() {
+  _sg_host_detail "$1"
+  [[ "$_SG_D_USER" == "git" ]]
+}
+
 # gum-filter picker over host aliases. Echoes the chosen alias (empty on cancel).
 _sg_pick_host() {
   local hosts
   hosts=$(_sg_host_aliases)
   [[ -z "$hosts" ]] && { _sg_warn "No hosts found in $_SG_CONFIG" >&2; return 1; }
+  print -r -- "$hosts" | gum filter --placeholder "${1:-Search host...}"
+}
+
+# Same as _sg_pick_host but only offers connectable (non-git-remote) hosts.
+_sg_pick_host_interactive() {
+  local hosts
+  hosts=$(_sg_host_aliases_interactive)
+  [[ -z "$hosts" ]] && { _sg_warn "No connectable hosts found in $_SG_CONFIG" >&2; return 1; }
   print -r -- "$hosts" | gum filter --placeholder "${1:-Search host...}"
 }
 
@@ -249,18 +344,20 @@ _sg_pick_key() {
 # Connect
 # ─────────────────────────────────────────────
 
-# Action menu for a selected host (shared by Connect + Hosts → Search).
+# Action menu for a selected host (shared by Connect + Hosts → List).
 _sg_host_actions() {
   local alias="$1" action
   action=$(gum choose --header "$alias" \
     " Connect|connect" \
+    " Connect With...|connectwith" \
     " Copy SSH Command|copy" \
     " Show Details|details" \
     " Back|back")
   case "$action" in
-    connect) _sg_connect_target "$alias" ;;
-    copy)    printf 'ssh %s' "$alias" | pbcopy; _sg_success "Copied: ssh $alias" ;;
-    details) _sg_show_details "$alias" ;;
+    connect)     _sg_info "ssh $alias"; ssh "$alias" ;;
+    connectwith) _sg_connect_target "$alias" ;;
+    copy)        printf 'ssh %s' "$alias" | pbcopy; _sg_success "Copied: ssh $alias" ;;
+    details)     _sg_show_details "$alias" ;;
   esac
 }
 
@@ -333,16 +430,17 @@ _sg_connect() {
   _sg_require_config || return
   local alias
   echo ""; _sg_banner; echo ""
-  alias=$(_sg_pick_host "Connect to...") || return
+  alias=$(_sg_pick_host_interactive "Connect to...") || return
   [[ -z "$alias" ]] && return
-  _sg_host_actions "$alias"
+  _sg_info "ssh $alias"
+  ssh "$alias"
 }
 
 # ─────────────────────────────────────────────
 # Hosts
 # ─────────────────────────────────────────────
 
-_sg_hosts_list() {
+_sg_hosts_view() {
   _sg_require_config || return
   local hosts out
   hosts=$(_sg_host_aliases)
@@ -416,6 +514,7 @@ _sg_hosts_add() {
   _sg_backup_config
   printf '\n%s\n' "$block" >> "$_SG_CONFIG"
   _SG_HOSTS=""   # refresh cache
+  _SG_HOSTS_INTERACTIVE=""
   _sg_success "Added '$alias' (backup written)."
 }
 
@@ -452,6 +551,7 @@ _sg_hosts_remove() {
     { print }
   ' "$_SG_CONFIG" > "$tmp" && mv "$tmp" "$_SG_CONFIG"
   _SG_HOSTS=""   # refresh cache
+  _SG_HOSTS_INTERACTIVE=""
   _sg_success "Removed '$alias' (backup written)."
 }
 
@@ -461,15 +561,15 @@ _sg_hosts() {
   while true; do
     choice=$(gum choose --header "Hosts >" \
       " List|list" \
-      " Search|search" \
+      " View|view" \
       " Add|add" \
       " Remove|remove" \
       " Test Connection|test" \
       " Back|back")
     [[ -z "$choice" || "$choice" == "back" ]] && return
     case "$choice" in
-      list)   _sg_hosts_list ;;
-      search) a=$(_sg_pick_host) && [[ -n "$a" ]] && _sg_host_actions "$a" ;;
+      list)   a=$(_sg_pick_host) && [[ -n "$a" ]] && _sg_host_actions "$a" ;;
+      view)   _sg_hosts_view ;;
       add)    _sg_hosts_add ;;
       remove) _sg_hosts_remove ;;
       test)   _sg_hosts_test ;;
@@ -664,6 +764,15 @@ _sg_config_view_host() {
 
 _sg_config_open() {
   _sg_require_config || return
+  _sg_backup_config
+  ${EDITOR:-vi} "$_SG_CONFIG"
+  _SG_HOSTS=""   # config may have changed — drop cache
+  _SG_HOSTS_INTERACTIVE=""
+  _sg_info "Host cache refreshed."
+}
+
+_sg_config_open_with() {
+  _sg_require_config || return
   local editor
   editor=$(gum choose --header "Open $_SG_CONFIG with..." \
     " Kiro|kiro" \
@@ -676,11 +785,13 @@ _sg_config_open() {
     *)       return ;;
   esac
   _SG_HOSTS=""   # config may have changed — drop cache
+  _SG_HOSTS_INTERACTIVE=""
   _sg_info "Host cache refreshed."
 }
 
 _sg_config_reload() {
   _SG_HOSTS=""
+  _SG_HOSTS_INTERACTIVE=""
   _sg_success "Reloaded host cache from $_SG_CONFIG"
 }
 
@@ -691,13 +802,15 @@ _sg_config() {
     choice=$(gum choose --header "Config >" \
       " View Host|view" \
       " Open Config|open" \
+      " Open Config With...|openwith" \
       " Reload|reload" \
       " Back|back")
     [[ -z "$choice" || "$choice" == "back" ]] && return
     case "$choice" in
-      view)   _sg_config_view_host ;;
-      open)   _sg_config_open ;;
-      reload) _sg_config_reload ;;
+      view)     _sg_config_view_host ;;
+      open)     _sg_config_open ;;
+      openwith) _sg_config_open_with ;;
+      reload)   _sg_config_reload ;;
     esac
   done
 }
@@ -713,6 +826,7 @@ ssi — gum-powered SSH manager
   ssi            full SSH > menu (Connect / Hosts / Keys / Agent / Config)
   ssi connect    fast path: search hosts and connect
   ssi <alias>    connect directly to a known host
+  ssi theme      [light|dark|auto]   Set terminal color theme for this terminal/IDE
   ssi -h         this help
 
 ~/.ssh/config is the source of truth. Backups (config.bak.*) are written before
@@ -763,6 +877,7 @@ _sg_menu() {
 ssi() {
   setopt localtraps
   _sg_require_gum || return
+  _sg_apply_theme_pref
   _sg_theme
 
   _sg_term_theme_start
@@ -772,6 +887,7 @@ ssi() {
     -h|--help|help) _sg_usage; return ;;
     ""|menu)        _sg_menu; return ;;
     connect)        _sg_connect; return ;;             # fast picker
+    theme)          shift; _sg_theme_cmd "$@"; return ;;
     *)              _sg_info "ssh $1"; ssh "$1" ;;     # direct connect
   esac
 }

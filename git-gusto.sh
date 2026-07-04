@@ -144,6 +144,17 @@ _gm_remote_delete() {
   _gm_run remote remove "$name" && _gm_success "Removed remote: $name"
 }
 
+_gm_open_target() {
+  local target="$1" action
+  action=$(gum choose --header "Open in:" \
+    " Kiro|Kiro" " Shell|Shell" " Skip|Skip")
+  case "$action" in
+    Kiro)  kiro "$target" ;;
+    Shell) cd "$target" && exec $SHELL ;;
+    Skip)  ;;
+  esac
+}
+
 _gm_clone() {
   local remote dest target
 
@@ -175,12 +186,14 @@ Into:  $dest"
   target=$(cd "$dest" 2>/dev/null && pwd) || return 0
   local action
   action=$(gum choose --header "Open clone in:" \
-    " Kiro|Kiro" " Shell|Shell" " Skip|Skip")
+    " Shell|shell" \
+    " Open Clone With...|with" \
+    " Skip|skip")
 
   case "$action" in
-    Kiro)  kiro "$target" ;;
-    Shell) cd "$target" && exec $SHELL ;;
-    Skip)  ;;
+    shell) cd "$target" && exec $SHELL ;;
+    with)  _gm_open_target "$target" ;;
+    skip)  ;;
   esac
 }
 
@@ -292,16 +305,85 @@ _gm_require_repo() {
 
 # Magenta/Purple palette (256-color codes). Used by the style helpers and
 # exported (via _gm_theme) to every gum widget for a consistent look.
-_GM_PRIMARY=212    # magenta — cursor, selected, accents
 _GM_SECONDARY=141  # purple  — headers, prompts
 _GM_SUCCESS=84     # green
 _GM_WARN=215       # orange
 _GM_ERROR=203      # red
 _GM_MUTED=245      # gray
 _GM_BG=235         # dark gray — gum widget text background
-_GM_FG=254         # off-white — gum widget text foreground
-_GM_BG_HEX="#262626"  # same dark gray, for the terminal-wide background (OSC 11)
-_GM_FG_HEX="#e4e4e4"  # same off-white, for the terminal-wide foreground (OSC 10)
+
+_GM_PRIMARY_DARK=213   # brighter magenta — cursor, selected, accents (dark theme)
+_GM_FG_DARK=254             # off-white — gum widget text foreground (dark theme)
+_GM_FG_HEX_DARK="#e4e4e4"   # off-white — terminal-wide foreground, OSC 10 (dark theme)
+_GM_BG_HEX_DARK="#262626"   # dark gray — terminal-wide background, OSC 11 (dark theme)
+
+_GM_PRIMARY_LIGHT=213  # magenta — cursor, selected, accents (light theme)
+_GM_FG_LIGHT=236            # dark gray — gum widget text foreground (light theme)
+_GM_FG_HEX_LIGHT="#141414"  # dark gray — terminal-wide foreground, OSC 10 (light theme)
+_GM_BG_HEX_LIGHT="#FDFDFD"  # light gray — terminal-wide background, OSC 11 (light theme)
+
+# Resolved per-run by _gm_apply_theme_pref (defaults to dark, today's behavior).
+_GM_PRIMARY=$_GM_PRIMARY_DARK
+_GM_FG=$_GM_FG_DARK
+_GM_FG_HEX=$_GM_FG_HEX_DARK
+_GM_BG_HEX=$_GM_BG_HEX_DARK
+
+# Per-terminal theme preference, keyed by $TERM_PROGRAM (covers both terminal
+# emulators and IDE-integrated terminals). Some terminals (e.g. Warp) ignore the
+# OSC 11 background escape below, so their real background stays whatever their
+# own theme is — 'gg theme light' lets a user match gg's foreground to that.
+_gm_theme_config_file() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/git-gusto/theme.conf"; }
+
+# Prints "light" or "dark" if a preference is saved for this $TERM_PROGRAM, else nothing.
+_gm_theme_get_saved() {
+  local key="${TERM_PROGRAM:-unknown}" file=$(_gm_theme_config_file)
+  [[ -f "$file" ]] || return
+  awk -F= -v k="$key" '$1==k{print $2}' "$file" | tail -1
+}
+
+# value: "light" | "dark" | "auto" (auto = remove override, revert to default).
+_gm_theme_set_saved() {
+  local value="$1" key="${TERM_PROGRAM:-unknown}" file=$(_gm_theme_config_file)
+  mkdir -p "${file:h}"
+  local tmp="${file}.tmp.$$"
+  [[ -f "$file" ]] && grep -v "^${key}=" "$file" > "$tmp"
+  [[ "$value" != "auto" ]] && echo "${key}=${value}" >> "$tmp"
+  mv "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+}
+
+# Apply the saved preference (if any) for this terminal; default stays dark.
+_gm_apply_theme_pref() {
+  if [[ "$(_gm_theme_get_saved)" == "light" ]]; then
+    _GM_PRIMARY=$_GM_PRIMARY_LIGHT
+    _GM_FG=$_GM_FG_LIGHT
+    _GM_FG_HEX=$_GM_FG_HEX_LIGHT
+    _GM_BG_HEX=$_GM_BG_HEX_LIGHT
+  else
+    _GM_PRIMARY=$_GM_PRIMARY_DARK
+    _GM_FG=$_GM_FG_DARK
+    _GM_FG_HEX=$_GM_FG_HEX_DARK
+    _GM_BG_HEX=$_GM_BG_HEX_DARK
+  fi
+}
+
+_gm_theme_cmd() {
+  local action="${1:l}"
+  case "$action" in
+    light|dark)
+      _gm_theme_set_saved "$action"
+      _gm_success "Theme set to '$action' for ${TERM_PROGRAM:-this terminal}."
+      ;;
+    auto|reset)
+      _gm_theme_set_saved "auto"
+      _gm_success "Theme reset to default (dark) for ${TERM_PROGRAM:-this terminal}."
+      ;;
+    "")
+      local saved=$(_gm_theme_get_saved)
+      _gm_info "Current terminal (${TERM_PROGRAM:-unknown}): ${saved:-dark (default)}"
+      ;;
+    *) _gm_error "Usage: gg theme [light|dark|auto]" ;;
+  esac
+}
 
 # Paint the whole terminal background/foreground for the duration of gg().
 # Best-effort: OSC 10/11 are ignored by terminals that don't support them.
@@ -617,8 +699,8 @@ _gm_branch() {
   # the interactive picker loops back to itself after each action.
   if [[ -n "$action" ]]; then
     case "${action:l}" in
-      list)     _gm_branch_list "$@" ;;
-      switch)   _gm_branch_switch ;;
+      list)     _gm_branch_switch ;;
+      view)     _gm_branch_view "$@" ;;
       create)   _gm_branch_create ;;
       rename)   _gm_branch_rename ;;
       delete)   _gm_branch_delete ;;
@@ -631,12 +713,12 @@ _gm_branch() {
   while true; do
     action=$(gum choose \
       --header "Branch:" \
-      " List|List" " Switch|Switch" " Create|Create" " Rename|Rename" " Delete|Delete" " Back|← Back")
+      " List|List" " View|View" " Create|Create" " Rename|Rename" " Delete|Delete" " Back|← Back")
     [[ -z "$action" || "${action:l}" == "← back" || "${action:l}" == "back" ]] && return
 
     case "${action:l}" in
-      list)     _gm_branch_list ;;
-      switch)   _gm_branch_switch ;;
+      list)     _gm_branch_switch ;;
+      view)     _gm_branch_view ;;
       create)   _gm_branch_create ;;
       rename)   _gm_branch_rename ;;
       delete)   _gm_branch_delete ;;
@@ -833,7 +915,7 @@ _gm_branch_delete_remote() {
   fi
 }
 
-_gm_branch_list() {
+_gm_branch_view() {
   local scope="$1" current local_branches remote_branches width group
 
   if [[ -z "$scope" ]]; then
@@ -983,8 +1065,8 @@ _gm_worktree() {
     case "${action:l}" in
       add|create)      _gm_worktree_create ;;
       remove|delete)   _gm_worktree_delete ;;
-      open)     _gm_worktree_open ;;
-      list)     _gm_worktree_list ;;
+      list)     _gm_worktree_open ;;
+      view)     _gm_worktree_view ;;
       "← back"|back) return ;;
       *) _gm_error "Unknown worktree action: $action" ;;
     esac
@@ -994,14 +1076,14 @@ _gm_worktree() {
   while true; do
     action=$(gum choose \
       --header "Worktree:" \
-      " List|List" " Add|Add" " Remove|Remove" " Open|Open" " Back|← Back")
+      " List|List" " View|View" " Add|Add" " Remove|Remove" " Back|← Back")
     [[ -z "$action" || "${action:l}" == "← back" || "${action:l}" == "back" ]] && return
 
     case "${action:l}" in
       add|create)      _gm_worktree_create ;;
       remove|delete)   _gm_worktree_delete ;;
-      open)     _gm_worktree_open ;;
-      list)     _gm_worktree_list ;;
+      list)     _gm_worktree_open ;;
+      view)     _gm_worktree_view ;;
       *) _gm_error "Unknown worktree action: $action" ;;
     esac
   done
@@ -1073,12 +1155,14 @@ Path:   $wt_path"
 
   local open_action
   open_action=$(gum choose --header "Open worktree in:" \
-    " Kiro|Kiro" " Shell|Shell" " Skip|Skip")
+    " Shell|shell" \
+    " Open Worktree With...|with" \
+    " Skip|skip")
 
   case "$open_action" in
-    Kiro)  kiro "$wt_path" ;;
-    Shell) cd "$wt_path" && exec $SHELL ;;
-    Skip)  ;;
+    shell) cd "$wt_path" && exec $SHELL ;;
+    with)  _gm_open_target "$wt_path" ;;
+    skip)  ;;
   esac
 }
 
@@ -1120,16 +1204,18 @@ _gm_worktree_open() {
 
   action=$(gum choose \
     --header "Open '$branch' in:" \
-    " Kiro|Kiro" " Shell|Shell" " Copy Path|Copy Path")
+    " Shell|shell" \
+    " Open With...|with" \
+    " Copy Path|copy")
 
   case "$action" in
-    Kiro)       kiro "$wt_path" ;;
-    Shell)      cd "$wt_path" && exec $SHELL ;;
-    "Copy Path") echo -n "$wt_path" | pbcopy && _gm_success "Path copied to clipboard" ;;
+    shell) cd "$wt_path" && exec $SHELL ;;
+    with)  _gm_open_target "$wt_path" ;;
+    copy)  echo -n "$wt_path" | pbcopy && _gm_success "Path copied to clipboard" ;;
   esac
 }
 
-_gm_worktree_list() {
+_gm_worktree_view() {
   {
     gum style --foreground $_GM_PRIMARY --bold " WORKTREES"
     git worktree list | while read -r line; do
@@ -1882,6 +1968,7 @@ _gm_usage() {
   gg init                      Initialize git here
   gg clone                     Clone a repository
   gg remote   [list|set|remove]   Manage remotes (origin/upstream/…)
+  gg theme    [light|dark|auto]   Set terminal color theme for this terminal/IDE
   gg help                      Show this help"
 }
 
@@ -1908,6 +1995,7 @@ _gm_dispatch() {
     init)               _gm_init_repo ;;
     clone|cl)           _gm_clone ;;
     remote|origin)      _gm_remote "$@" ;;
+    theme)              _gm_theme_cmd "$@" ;;
     help|-h|--help|h)   _gm_usage ;;
     *) _gm_error "Unknown command: $cmd"; echo ""; _gm_usage; return 1 ;;
   esac
@@ -1916,6 +2004,7 @@ _gm_dispatch() {
 gg() {
   setopt localtraps
   _gm_require_gum || return
+  _gm_apply_theme_pref
   _gm_theme
   _gm_require_git || return
 
@@ -1925,7 +2014,7 @@ gg() {
   # Direct subcommand mode: 'gg <command> [sub-action]'.
   if [[ -n "$1" ]]; then
     case "${1:l}" in
-      init|clone|cl|remote|origin|help|-h|--help|h) ;;
+      init|clone|cl|remote|origin|theme|help|-h|--help|h) ;;
       *) _gm_repo_setup_if_needed || return ;;
     esac
     _gm_dispatch "$@"
