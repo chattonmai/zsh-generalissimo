@@ -170,7 +170,7 @@ _gm_clone() {
   [[ -z "$dest" ]] && dest="$default"
 
   echo ""
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY \
+  _gm_block "$_GM_BLOCK_HEX" \
     "Clone: $remote
 Into:  $dest"
   echo ""
@@ -311,6 +311,28 @@ _GM_WARN=215       # orange
 _GM_ERROR=203      # red
 _GM_MUTED=245      # gray
 _GM_BG=235         # dark gray — gum widget text background
+
+# Truecolor palette for solid filled-background blocks (previews, confirmations,
+# the "view" list screens). Fixed regardless of light/dark theme, since the
+# block sets its own background explicitly.
+_GM_BLOCK_HEX="#7C6FF0"        # primary block bg
+_GM_BLOCK_WARN_HEX="#D98E3E"   # warn/destructive-preview block bg
+_GM_BLOCK_ERROR_HEX="#D9556A"  # error/delete-preview block bg
+_GM_BLOCK_FG_HEX="#F5F3FF"     # off-white text on any block bg
+
+# Rotating palette for multi-group "view" screens (e.g. one color per
+# feature/, fix/, chore/ branch prefix) so adjacent groups look distinct.
+# _gm_group_boxes cycles through this starting at a caller-given offset.
+_GM_BLOCK_PALETTE=(
+  "#7C6FF0"  # purple
+  "#5B8DEF"  # blue
+  "#4EC9B0"  # teal
+  "#E0607A"  # pink
+  "#D98E3E"  # amber
+  "#8FD14F"  # green
+  "#B57EDC"  # lavender
+  "#4FA8D8"  # sky
+)
 
 _GM_PRIMARY_DARK=213   # brighter magenta — cursor, selected, accents (dark theme)
 _GM_FG_DARK=254             # off-white — gum widget text foreground (dark theme)
@@ -460,6 +482,14 @@ _gm_warn()    { gum style --foreground $_GM_WARN    "⚠ $1"; }
 _gm_error()   { gum style --foreground $_GM_ERROR   "✘ $1"; }
 _gm_info()    { gum style --foreground $_GM_SECONDARY "→ $1"; }
 
+# Render a solid filled-background block (lipglass-style) instead of an
+# outlined border. Usage: _gm_block <hex-color> [gum style args...] <text>
+_gm_block() {
+  local hex="$1"; shift
+  gum style --background "$hex" --foreground "$_GM_BLOCK_FG_HEX" \
+    --bold --padding "1 2" "$@"
+}
+
 # Print the git command about to run (for transparency), e.g. _gm_cmd push -u origin main
 _gm_cmd() { gum style --foreground $_GM_MUTED "\$ git $*"; }
 # Print + run a git action command in one call.
@@ -486,26 +516,45 @@ _gm_repo_name() {
 }
 
 # Lay items read from stdin into a column-major, space-padded grid that fits
-# within <width> columns. Usage: _gm_columnize <width>
+# within <width> columns. A single long outlier no longer forces every column
+# to match its width — items longer than a cap render on their own full-width
+# row below the grid instead, so the grid adapts down to as little as one
+# column when items are long/width is small. Usage: _gm_columnize <width>
 _gm_columnize() {
   awk -v width="$1" '
-    { items[NR]=$0; if (length($0) > maxw) maxw=length($0) }
+    { items[NR]=$0 }
     END {
       if (NR == 0) exit
-      gap=2; colw=maxw+gap
-      ncols=int(width/colw); if (ncols < 1) ncols=1
-      nrows=int((NR + ncols - 1) / ncols)
-      for (r=0; r<nrows; r++) {
-        line=""
-        for (c=0; c<ncols; c++) {
-          idx=c*nrows + r + 1
-          if (idx <= NR) {
-            s=items[idx]; line=line s
-            pad=colw-length(s); while (pad-- > 0) line=line " "
-          }
-        }
-        gsub(/ +$/, "", line); print line
+      gap=2; cap=24
+      maxw=0
+      for (i=1; i<=NR; i++) {
+        len=length(items[i])
+        if (len <= cap && len > maxw) maxw=len
       }
+      colw=maxw+gap
+      ncols=int(width/colw); if (ncols < 1) ncols=1
+
+      m=0
+      for (i=1; i<=NR; i++) {
+        if (length(items[i]) <= cap) { m++; norm[m]=items[i] }
+        else { longn++; longitems[longn]=items[i] }
+      }
+
+      if (m > 0) {
+        nrows=int((m + ncols - 1) / ncols)
+        for (r=0; r<nrows; r++) {
+          line=""
+          for (c=0; c<ncols; c++) {
+            idx=c*nrows + r + 1
+            if (idx <= m) {
+              s=norm[idx]; line=line s
+              pad=colw-length(s); while (pad-- > 0) line=line " "
+            }
+          }
+          gsub(/ +$/, "", line); print line
+        }
+      }
+      for (i=1; i<=longn; i++) print longitems[i]
     }
   '
 }
@@ -513,9 +562,11 @@ _gm_columnize() {
 # Render refs (branches/tags) read from stdin as one full-width box per prefix
 # group (split on the first <delim>); refs without <delim> go in a "•" box.
 # Each box: bold group title + the full ref names laid out in dynamic columns.
-# Usage: _gm_group_boxes <delim> <color> <width>
+# Groups cycle through _GM_BLOCK_PALETTE starting at <palette-offset>, so
+# adjacent groups (feature/, fix/, chore/, ...) get visibly different colors.
+# Usage: _gm_group_boxes <delim> <palette-offset> <width>
 _gm_group_boxes() {
-  local delim="$1" color="${2:-$_GM_PRIMARY}" width="${3:-120}"
+  local delim="$1" offset="${2:-0}" width="${3:-120}"
   local line key
   local -A members
   local -a order
@@ -531,14 +582,22 @@ _gm_group_boxes() {
     members[$key]+="${line}"$'\n'
   done
 
-  local inner=$(( width - 4 ))   # account for border (2) + padding (2)
+  local inner=$(( width - 4 ))   # account for block padding (2) + margin (2)
   (( inner < 10 )) && inner=10
 
+  local content blockw color_hex i=0 palette_len=${#_GM_BLOCK_PALETTE[@]}
   for key in "${order[@]}"; do
-    gum style \
-      --border rounded --border-foreground "$color" --padding "0 1" \
-      "$(gum style --foreground "$color" --bold "$key")
-$(echo "${members[$key]%$'\n'}" | _gm_columnize "$inner")"
+    color_hex="${_GM_BLOCK_PALETTE[$(( (offset + i) % palette_len + 1 ))]}"
+    gum style --foreground "$color_hex" --bold " $key"
+    content=$(echo "${members[$key]%$'\n'}" | _gm_columnize "$inner")
+    blockw=$(echo "$content" | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
+    (( blockw > inner )) && blockw=$inner
+    (( blockw < 1 )) && blockw=1
+    # _gm_block's --padding "1 2" adds 4 cols (2 left + 2 right); gum's --width
+    # is the total rendered width including padding, so add it back here.
+    _gm_block "$color_hex" --width "$(( blockw + 4 ))" "$content"
+    echo ""
+    (( i++ ))
   done
 }
 
@@ -641,7 +700,7 @@ _gm_commit() {
     [[ -z "$msg" ]] && return 1
 
     echo ""
-    gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY "$msg"
+    _gm_block "$_GM_BLOCK_HEX" "$msg"
     echo ""
 
     gum confirm "Commit with this message?" || return 1
@@ -672,7 +731,7 @@ _gm_commit() {
   full_msg="$branch | $type: $msg"
 
   echo ""
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY "$full_msg"
+  _gm_block "$_GM_BLOCK_HEX" "$full_msg"
   echo ""
 
   gum confirm "Commit with this message?" || return 1
@@ -939,7 +998,7 @@ _gm_branch_view() {
     if [[ -n "$local_branches" ]]; then
       gum style --foreground $_GM_PRIMARY --bold " LOCAL  (current: $current)"
       echo ""
-      echo "$local_branches" | _gm_filter_group "/" "$group" | _gm_group_boxes "/" $_GM_PRIMARY $width
+      echo "$local_branches" | _gm_filter_group "/" "$group" | _gm_group_boxes "/" 0 $width
     fi
 
     [[ -n "$local_branches" && -n "$remote_branches" ]] && echo ""
@@ -947,7 +1006,7 @@ _gm_branch_view() {
     if [[ -n "$remote_branches" ]]; then
       gum style --foreground $_GM_SECONDARY --bold " REMOTE (origin)"
       echo ""
-      echo "$remote_branches" | _gm_filter_group "/" "$group" | _gm_group_boxes "/" $_GM_SECONDARY $width
+      echo "$remote_branches" | _gm_filter_group "/" "$group" | _gm_group_boxes "/" 4 $width
     fi
   } | gum pager
 }
@@ -964,6 +1023,7 @@ _gm_tag() {
   if [[ -n "$action" ]]; then
     case "${action:l}" in
       list)            _gm_tag_list ;;
+      view)            _gm_tag_view ;;
       add|create)      _gm_tag_create ;;
       remove|delete)   _gm_tag_delete ;;
       "← back"|back) return ;;
@@ -975,11 +1035,12 @@ _gm_tag() {
   while true; do
     action=$(gum choose \
       --header "Tag:" \
-      " List|List" " Add|Add" " Remove|Remove" " Back|← Back")
+      " List|List" " View|View" " Add|Add" " Remove|Remove" " Back|← Back")
     [[ -z "$action" || "${action:l}" == "← back" || "${action:l}" == "back" ]] && return
 
     case "${action:l}" in
       list)            _gm_tag_list ;;
+      view)            _gm_tag_view ;;
       add|create)      _gm_tag_create ;;
       remove|delete)   _gm_tag_delete ;;
       *) _gm_error "Unknown tag action: $action" ;;
@@ -993,7 +1054,7 @@ _gm_tag_create() {
   [[ -z "$tag" ]] && return
 
   echo ""
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY "Tag: $tag"
+  _gm_block "$_GM_BLOCK_HEX" "Tag: $tag"
   echo ""
   gum confirm "Create tag '$tag'?" || return
 
@@ -1036,7 +1097,41 @@ _gm_tag_delete() {
   fi
 }
 
+# Quick pick-and-go, mirroring _gm_branch_switch: fuzzy-pick a tag and check
+# it out (detached HEAD), stashing uncommitted changes out of the way first.
 _gm_tag_list() {
+  local tag dirty stashed
+  tag=$(git tag --sort=-v:refname | _gm_filter --no-fuzzy-sort --placeholder "Search tag...")
+  [[ -z "$tag" ]] && return
+
+  dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$dirty" -gt 0 ]]; then
+    if gum confirm "You have uncommitted changes. Stash them before checkout?"; then
+      _gm_cmd stash push -u -m "gg: checkout tag $tag"
+      gum spin --title "Stashing..." -- git stash push -u -m "gg: checkout tag $tag" && stashed=1
+    fi
+  fi
+
+  if ! _gm_run checkout "$tag"; then
+    _gm_error "Checkout failed"
+    [[ -n "$stashed" ]] && _gm_info "Your changes are stashed — 'git stash pop' to restore."
+    return 1
+  fi
+  _gm_success "Checked out tag: $tag (detached HEAD)"
+
+  if [[ -n "$stashed" ]] && gum confirm "Restore your stashed changes here (stash pop)?"; then
+    _gm_cmd stash pop
+    if gum spin --title "Popping stash..." -- git stash pop; then
+      _gm_success "Stash applied"
+    else
+      _gm_warn "Stash pop hit conflicts — resolve them, then 'git stash drop' if needed."
+    fi
+  fi
+}
+
+# Read-only browse of all tags, grouped by prefix into colored blocks (matches
+# _gm_branch_view / _gm_worktree_view).
+_gm_tag_view() {
   local tags width group
   tags=$(git tag --sort=-v:refname)
 
@@ -1048,7 +1143,7 @@ _gm_tag_list() {
   {
     gum style --foreground $_GM_PRIMARY --bold " TAGS"
     echo ""
-    echo "$tags" | _gm_filter_group "=" "$group" | _gm_group_boxes "=" $_GM_PRIMARY $width
+    echo "$tags" | _gm_filter_group "=" "$group" | _gm_group_boxes "=" 0 $width
   } | gum pager
 }
 
@@ -1134,7 +1229,7 @@ _gm_worktree_create_for() {
   wt_path="${base}/${name}"
 
   echo ""
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY \
+  _gm_block "$_GM_BLOCK_HEX" \
     "Branch: $branch
 Name:   $name
 Path:   $wt_path"
@@ -1179,7 +1274,7 @@ _gm_worktree_delete() {
   branch=$(echo "$selected" | awk '{print $3}' | tr -d '[]')
 
   echo ""
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_ERROR \
+  _gm_block "$_GM_BLOCK_ERROR_HEX" \
     "Branch: $branch
 Path:   $wt_path"
   echo ""
@@ -1294,12 +1389,19 @@ _gm_search_commits() {
     hash=$(echo "$selected" | awk '{print $1}')
 
     action=$(gum choose --header "Action for $hash:" \
-      " Show Diff|Show Diff" " Show Files|Show Files" " Copy Hash|Copy Hash" " Back|← Back")
+      " Show Diff|Show Diff" " Show Files|Show Files" " Checkout|Checkout" " Copy Hash|Copy Hash" " Back|← Back")
     [[ -z "$action" || "$action" == "← Back" ]] && continue
 
     case "$action" in
       "Show Diff")  git show "$hash" | gum pager ;;
       "Show Files") git show --name-only "$hash" | gum pager ;;
+      Checkout)
+        if _gm_run checkout "$hash"; then
+          _gm_success "Checked out $hash (detached HEAD)"
+        else
+          _gm_error "Checkout failed"
+        fi
+        ;;
       "Copy Hash")  echo -n "$hash" | pbcopy && _gm_success "Hash copied: $hash" ;;
     esac
   done
@@ -1547,7 +1649,7 @@ _gm_merge() {
   [[ -z "$mode" || "${mode:l}" == "← back" || "${mode:l}" == "back" ]] && return
 
   echo ""
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY \
+  _gm_block "$_GM_BLOCK_HEX" \
     "Merge: $source → $current
 Mode:  $mode"
   echo ""
@@ -1653,7 +1755,7 @@ _gm_rebase() {
   [[ -z "$onto" ]] && return
 
   echo ""
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_PRIMARY \
+  _gm_block "$_GM_BLOCK_HEX" \
     "Rebase: $current onto $onto"
   echo ""
   gum confirm "Rebase '$current' onto '$onto'?" || return
@@ -1797,7 +1899,7 @@ _gm_undo_commit() {
     return 1
   fi
 
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_WARN "Last commit: $last"
+  _gm_block "$_GM_BLOCK_WARN_HEX" "Last commit: $last"
   echo ""
 
   mode=$(gum choose \
@@ -1854,7 +1956,7 @@ _gm_reset_to() {
   [[ -z "$commit" ]] && return
   commit=$(echo "$commit" | awk '{print $1}')
 
-  gum style --border rounded --padding "0 1" --border-foreground $_GM_WARN \
+  _gm_block "$_GM_BLOCK_WARN_HEX" \
     "Reset HEAD to: $(git log -1 --oneline "$commit")"
   echo ""
 

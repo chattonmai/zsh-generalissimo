@@ -21,6 +21,28 @@ _SG_ERROR=203      # red
 _SG_MUTED=245      # gray
 _SG_BG=235         # dark gray — gum widget text background
 
+# Truecolor palette for solid filled-background blocks (previews, confirmations,
+# the "view" list screens). Fixed regardless of light/dark theme, since the
+# block sets its own background explicitly.
+_SG_BLOCK_HEX="#7C6FF0"        # primary block bg
+_SG_BLOCK_WARN_HEX="#D98E3E"   # warn/destructive-preview block bg
+_SG_BLOCK_ERROR_HEX="#D9556A"  # error/delete-preview block bg
+_SG_BLOCK_FG_HEX="#F5F3FF"     # off-white text on any block bg
+
+# Rotating palette for multi-group "view" screens (e.g. one color per host
+# alias prefix) so adjacent groups look distinct. _sg_group_boxes cycles
+# through this starting at a caller-given offset.
+_SG_BLOCK_PALETTE=(
+  "#7C6FF0"  # purple
+  "#5B8DEF"  # blue
+  "#4EC9B0"  # teal
+  "#E0607A"  # pink
+  "#D98E3E"  # amber
+  "#8FD14F"  # green
+  "#B57EDC"  # lavender
+  "#4FA8D8"  # sky
+)
+
 _SG_PRIMARY_DARK=213   # brighter magenta — cursor, selected, accents (dark theme)
 _SG_FG_DARK=254             # off-white — gum widget text foreground (dark theme)
 _SG_FG_HEX_DARK="#e4e4e4"   # off-white — terminal-wide foreground, OSC 10 (dark theme)
@@ -171,6 +193,14 @@ _sg_warn()    { _sg_style $_SG_WARN      "⚠ $1"; }
 _sg_error()   { _sg_style $_SG_ERROR     "✘ $1"; }
 _sg_info()    { _sg_style $_SG_SECONDARY "→ $1"; }
 
+# Render a solid filled-background block (lipglass-style) instead of an
+# outlined border. Usage: _sg_block <hex-color> [gum style args...] <text>
+_sg_block() {
+  local hex="$1"; shift
+  gum style --background "$hex" --foreground "$_SG_BLOCK_FG_HEX" \
+    --bold --padding "1 2" "$@"
+}
+
 # ─────────────────────────────────────────────
 # Guards
 # ─────────────────────────────────────────────
@@ -199,33 +229,55 @@ _sg_require_config() {
 # ─────────────────────────────────────────────
 
 # Lay stdin items into a column-major, space-padded grid fitting <width> columns.
+# A single long outlier no longer forces every column to match its width —
+# items longer than a cap render on their own full-width row below the grid
+# instead, so the grid adapts down to as little as one column when items are
+# long/width is small.
 _sg_columnize() {
   awk -v width="$1" '
-    { items[NR]=$0; if (length($0) > maxw) maxw=length($0) }
+    { items[NR]=$0 }
     END {
       if (NR == 0) exit
-      gap=2; colw=maxw+gap
-      ncols=int(width/colw); if (ncols < 1) ncols=1
-      nrows=int((NR + ncols - 1) / ncols)
-      for (r=0; r<nrows; r++) {
-        line=""
-        for (c=0; c<ncols; c++) {
-          idx=c*nrows + r + 1
-          if (idx <= NR) {
-            s=items[idx]; line=line s
-            pad=colw-length(s); while (pad-- > 0) line=line " "
-          }
-        }
-        gsub(/ +$/, "", line); print line
+      gap=2; cap=24
+      maxw=0
+      for (i=1; i<=NR; i++) {
+        len=length(items[i])
+        if (len <= cap && len > maxw) maxw=len
       }
+      colw=maxw+gap
+      ncols=int(width/colw); if (ncols < 1) ncols=1
+
+      m=0
+      for (i=1; i<=NR; i++) {
+        if (length(items[i]) <= cap) { m++; norm[m]=items[i] }
+        else { longn++; longitems[longn]=items[i] }
+      }
+
+      if (m > 0) {
+        nrows=int((m + ncols - 1) / ncols)
+        for (r=0; r<nrows; r++) {
+          line=""
+          for (c=0; c<ncols; c++) {
+            idx=c*nrows + r + 1
+            if (idx <= m) {
+              s=norm[idx]; line=line s
+              pad=colw-length(s); while (pad-- > 0) line=line " "
+            }
+          }
+          gsub(/ +$/, "", line); print line
+        }
+      }
+      for (i=1; i<=longn; i++) print longitems[i]
     }
   '
 }
 
 # Render stdin lines as one box per prefix group (split on first <delim>); lines
-# without <delim> go in a "default" box. Usage: _sg_group_boxes <delim> <color> <width>
+# without <delim> go in a "default" box. Groups cycle through
+# _SG_BLOCK_PALETTE starting at <palette-offset>, so adjacent groups get
+# visibly different colors. Usage: _sg_group_boxes <delim> <palette-offset> <width>
 _sg_group_boxes() {
-  local delim="$1" color="${2:-$_SG_PRIMARY}" width="${3:-100}"
+  local delim="$1" offset="${2:-0}" width="${3:-100}"
   local line key
   local -A members
   local -a order
@@ -244,11 +296,19 @@ _sg_group_boxes() {
   local inner=$(( width - 4 ))
   (( inner < 10 )) && inner=10
 
+  local content blockw color_hex i=0 palette_len=${#_SG_BLOCK_PALETTE[@]}
   for key in "${order[@]}"; do
-    gum style \
-      --border rounded --border-foreground "$color" --padding "0 1" \
-      "$(gum style --foreground "$color" --bold "$key")
-$(echo "${members[$key]%$'\n'}" | _sg_columnize "$inner")"
+    color_hex="${_SG_BLOCK_PALETTE[$(( (offset + i) % palette_len + 1 ))]}"
+    gum style --foreground "$color_hex" --bold " $key"
+    content=$(echo "${members[$key]%$'\n'}" | _sg_columnize "$inner")
+    blockw=$(echo "$content" | awk '{ if (length($0) > m) m = length($0) } END { print m+0 }')
+    (( blockw > inner )) && blockw=$inner
+    (( blockw < 1 )) && blockw=1
+    # _sg_block's --padding "1 2" adds 4 cols (2 left + 2 right); gum's --width
+    # is the total rendered width including padding, so add it back here.
+    _sg_block "$color_hex" --width "$(( blockw + 4 ))" "$content"
+    echo ""
+    (( i++ ))
   done
 }
 
@@ -445,7 +505,7 @@ _sg_hosts_view() {
   local hosts out
   hosts=$(_sg_host_aliases)
   [[ -z "$hosts" ]] && { _sg_warn "No hosts found."; return; }
-  out=$(print -r -- "$hosts" | _sg_group_boxes "-" "$_SG_PRIMARY" 100)
+  out=$(print -r -- "$hosts" | _sg_group_boxes "-" 0 100)
   print -r -- "$out" | gum pager
 }
 
@@ -507,7 +567,7 @@ _sg_hosts_add() {
   [[ -n "$key" ]]            && block+=$'\n'"  IdentityFile $key"
 
   echo ""
-  gum style --border rounded --border-foreground $_SG_PRIMARY --padding "0 1" "$block"
+  _sg_block "$_SG_BLOCK_HEX" "$block"
   echo ""
   gum confirm "Append this host to $_SG_CONFIG?" || { _sg_info "Aborted."; return; }
 
@@ -539,7 +599,7 @@ _sg_hosts_remove() {
     inb { print }
   ' "$_SG_CONFIG")
   echo ""
-  gum style --border rounded --border-foreground $_SG_WARN --padding "0 1" "$block"
+  _sg_block "$_SG_BLOCK_WARN_HEX" "$block"
   echo ""
   gum confirm "Remove host '$alias' from $_SG_CONFIG?" || { _sg_info "Aborted."; return; }
 
@@ -607,8 +667,7 @@ _sg_keys_show_pub() {
     " Back|back")
   case "$action" in
     copy) pbcopy < "$pub"; _sg_success "Copied $(basename "$pub") to clipboard." ;;
-    view) gum style --border rounded --border-foreground $_SG_PRIMARY --padding "0 1" \
-            "$(cat "$pub")" ;;
+    view) _sg_block "$_SG_BLOCK_HEX" "$(cat "$pub")" ;;
   esac
 }
 
@@ -634,8 +693,7 @@ _sg_keys_generate() {
     chmod 600 "$path"; chmod 644 "$path.pub"
     _sg_success "Created $path"
     if gum confirm "Show the new public key?"; then
-      gum style --border rounded --border-foreground $_SG_PRIMARY --padding "0 1" \
-        "$(cat "$path.pub")"
+      _sg_block "$_SG_BLOCK_HEX" "$(cat "$path.pub")"
     fi
   else
     _sg_error "Key generation failed."
